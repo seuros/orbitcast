@@ -1,0 +1,53 @@
+# Ship Manifest - Fleet Configuration
+# https://github.com/seuros/mothership
+
+# =============================================================================
+# BASE TEMPLATES (optional - reduce duplication)
+# =============================================================================
+# Define defaults inherited by all ships/modules
+
+# [base.ship]
+# env = { RAILS_ENV = "production" }
+# critical = true
+# tags = ["ruby"]
+# comment = "Default ship settings"
+
+# [base.module]
+# phase = "request"
+# tags = ["security"]
+
+# =============================================================================
+# MOTHERSHIP (global configuration)
+# =============================================================================
+
+[mothership]
+metrics_port = 9090  # Prometheus metrics at http://127.0.0.1:9090/metrics
+
+# Named binds (external listeners)
+[mothership.bind]
+http = "0.0.0.0:80"
+# https = "0.0.0.0:443"
+# ws = "0.0.0.0:8080"
+
+# Environment variables inherited by all ships
+# [mothership.env]
+# RAILS_ENV = "production"
+
+# =============================================================================
+# FLEET (ship definitions)
+# =============================================================================
+# Ships can be filtered by tags at runtime:
+#   mothership --only web          # Only ships tagged "web"
+#   mothership --only web,api      # Ships tagged "web" OR "api"
+#   mothership --except workers    # All except "workers"
+
+# OrbitCast WebSocket server (docking protocol bay)
+[[bays.websocket]]
+name = "orbitcast"
+command = "target/release/orbitcast"
+tags = ["websocket", "actioncable"]
+config = { database_url = "postgres://localhost/myapp_development" }
+routes = [
+  { bind = "http", pattern = "/cable" },
+]
+

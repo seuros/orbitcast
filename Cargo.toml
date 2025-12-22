@@ -1,0 +1,76 @@
+[package]
+name = "orbitcast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92.0"
+authors = ["Abdelkader Boudih <oss@seuros.com>"]
+description = "Real-time WebSocket server with ActionCable protocol for Mothership"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/seuros/orbitcast"
+homepage = "https://github.com/seuros/orbitcast"
+documentation = "https://docs.rs/orbitcast"
+keywords = ["websocket", "actioncable", "realtime", "broadcasting", "rama"]
+categories = ["network-programming", "web-programming::websocket", "asynchronous"]
+
+[features]
+default = []
+postgres = ["dep:tokio-postgres"]
+memory = []
+# Future backends:
+# redis = ["dep:redis"]
+# nats = ["dep:async-nats"]
+
+[lib]
+name = "orbitcast"
+path = "src/lib.rs"
+
+[[bin]]
+name = "orbitcast"
+path = "src/main.rs"
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1.47", features = ["full", "signal"] }
+
+# Rama - WebSocket layer
+rama = { version = "0.3.0-alpha.3", features = ["http-full", "tcp"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Configuration
+toml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Utilities
+anyhow = "1.0"
+
+# Docking protocol
+mothership = { version = "0.0.21", default-features = false }
+
+# Pin rcgen to avoid x509-parser incompatibility
+rcgen = "=0.14.5"
+thiserror = "2.0"
+dashmap = "6.1"
+uuid = { version = "1.11", features = ["v4"] }
+async-trait = "0.1"
+
+# PostgreSQL (optional, default)
+tokio-postgres = { version = "0.7", optional = true }
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
