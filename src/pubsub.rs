@@ -5,10 +5,10 @@
 //!
 //! # Features
 //!
-//! Exactly one backend must be enabled at compile time:
+//! At least one backend must be enabled at compile time:
 //!
 //! - `postgres` - PostgreSQL LISTEN/NOTIFY for multi-node deployments
-//! - `memory` - In-memory broadcast for single-node/development
+//! - `memory` - In-memory broadcast for single-node/development (preferred if both enabled)
 
 #[cfg(feature = "postgres")]
 mod postgres;

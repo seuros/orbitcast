@@ -18,15 +18,11 @@
 //! - `MS_SHIP` - This ship's name
 //! - `MS_SOCKET_DIR` - Directory for Unix sockets
 
-// Compile-time feature validation: exactly one pub/sub backend required
+// Compile-time feature validation: at least one pub/sub backend required
 #[cfg(not(any(feature = "postgres", feature = "memory")))]
 compile_error!(
     "OrbitCast requires a pub/sub backend. Enable: --features postgres OR --features memory"
 );
-
-// Enforce mutual exclusivity
-#[cfg(all(feature = "postgres", feature = "memory"))]
-compile_error!("Only one pub/sub backend can be enabled. Choose postgres OR memory, not both.");
 
 pub mod actioncable;
 pub mod config;

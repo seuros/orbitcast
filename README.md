@@ -17,13 +17,18 @@ Clients (WS) → Mothership → Unix Socket → OrbitCast
 
 ```bash
 # Production (multi-node coordination via PostgreSQL)
-cargo install orbitcast --features postgres
+cargo install orbitcast
+# Or explicitly:
+# cargo install orbitcast --features postgres
 
 # Development (single-node, in-memory)
 cargo install orbitcast --features memory
+# If you want memory without compiling PostgreSQL deps:
+# cargo install orbitcast --no-default-features --features memory
 ```
 
-> Exactly one backend required. Mutually exclusive at compile time.
+> At least one backend is required. Features are additive; when both are enabled,
+> the binary prefers `memory`.
 
 ## Configuration
 

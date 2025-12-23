@@ -14,7 +14,7 @@ keywords = ["websocket", "actioncable", "realtime", "broadcasting", "rama"]
 categories = ["network-programming", "web-programming::websocket", "asynchronous"]
 
 [features]
-default = []
+default = ["postgres"]
 postgres = ["dep:tokio-postgres"]
 memory = []
 # Future backends:

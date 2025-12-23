@@ -146,6 +146,13 @@ impl Hub {
 
     /// Subscribe connection to a stream
     pub fn subscribe_to_stream(&self, conn_id: u32, stream: &str) {
+        if let Some(subs) = self.subscriptions.get(&conn_id) {
+            if subs.contains_key(stream) {
+                debug!(conn_id, stream, "already subscribed to stream");
+                return;
+            }
+        }
+
         // Get or create broadcast sender for this stream
         let sender = self
             .streams

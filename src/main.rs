@@ -18,7 +18,7 @@ use orbitcast::{
     Config, Hub, PubSub, Session,
 };
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(feature = "memory")))]
 use orbitcast::PostgresPubSub;
 
 #[cfg(feature = "memory")]
@@ -32,6 +32,39 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
     log_level: String,
+}
+
+async fn init_pubsub(config: &Config) -> Option<Arc<dyn PubSub>> {
+    #[cfg(feature = "memory")]
+    {
+        info!("Memory pub/sub initialized (single-node only)");
+        return Some(Arc::new(MemoryPubSub::new()));
+    }
+
+    #[cfg(all(not(feature = "memory"), feature = "postgres"))]
+    {
+        if let Some(ref db_url) = config.database_url {
+            match PostgresPubSub::new(db_url).await {
+                Ok(ps) => {
+                    info!("PostgreSQL pub/sub connected");
+                    return Some(Arc::new(ps));
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to connect to PostgreSQL pub/sub");
+                    return None;
+                }
+            }
+        } else {
+            warn!("No database_url in config - pub/sub disabled");
+            return None;
+        }
+    }
+
+    #[cfg(all(not(feature = "memory"), not(feature = "postgres")))]
+    {
+        let _ = config;
+        None
+    }
 }
 
 /// Perform docking handshake with Mothership
@@ -138,28 +171,7 @@ async fn main() -> anyhow::Result<()> {
     config.apply_moored_config(&moored.config);
 
     // Initialize pub/sub backend
-    #[cfg(feature = "postgres")]
-    let pubsub: Option<Arc<PostgresPubSub>> = if let Some(ref db_url) = config.database_url {
-        match PostgresPubSub::new(db_url).await {
-            Ok(ps) => {
-                info!("PostgreSQL pub/sub connected");
-                Some(Arc::new(ps))
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to connect to PostgreSQL pub/sub");
-                None
-            }
-        }
-    } else {
-        warn!("No database_url in config - pub/sub disabled");
-        None
-    };
-
-    #[cfg(feature = "memory")]
-    let pubsub: Option<Arc<MemoryPubSub>> = {
-        info!("Memory pub/sub initialized (single-node only)");
-        Some(Arc::new(MemoryPubSub::new()))
-    };
+    let pubsub = init_pubsub(&config).await;
 
     // Now split stream for bidirectional communication
     let (mut reader, mut writer) = stream.into_split();
@@ -175,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
         let ps_clone = ps.clone();
         let hub_clone = hub.clone();
         tokio::spawn(async move {
-            info!("Starting PostgreSQL pub/sub listener");
+            info!("Starting pub/sub listener");
             if let Err(e) = ps_clone
                 .listen(move |stream, payload| {
                     let hub = hub_clone.clone();
@@ -253,7 +265,8 @@ async fn main() -> anyhow::Result<()> {
             let (msg_type, payload_len) = match protocol::decode_header(&pending) {
                 Ok(header) => header,
                 Err(e) => {
-                    error!(error = %e, "Failed to decode header");
+                    error!(error = %e, "Failed to decode header; dropping pending buffer");
+                    pending.clear();
                     break;
                 }
             };
@@ -350,11 +363,21 @@ async fn main() -> anyhow::Result<()> {
                             // TODO: RPC to backend for processing
                             // For now, broadcast to stream subscribers
                             if let Ok(message) = serde_json::from_str::<serde_json::Value>(&data) {
-                                let broadcast = ServerMessage::Message {
-                                    identifier: identifier.clone(),
-                                    message,
-                                };
-                                hub.broadcast(&identifier, &actioncable::encode(&broadcast));
+                                if let Some(ref ps) = pubsub {
+                                    if let Err(e) = ps.publish(&identifier, data.as_bytes()).await {
+                                        warn!(
+                                            identifier = %identifier,
+                                            error = %e,
+                                            "Failed to publish to pub/sub"
+                                        );
+                                    }
+                                } else {
+                                    let broadcast = ServerMessage::Message {
+                                        identifier: identifier.clone(),
+                                        message,
+                                    };
+                                    hub.broadcast(&identifier, &actioncable::encode(&broadcast));
+                                }
                             }
                         }
 

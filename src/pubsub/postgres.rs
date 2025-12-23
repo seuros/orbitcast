@@ -4,6 +4,7 @@
 
 use crate::pubsub::PubSub;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_postgres::{AsyncMessage, NoTls};
@@ -11,7 +12,7 @@ use tokio_postgres::{AsyncMessage, NoTls};
 /// PostgreSQL-backed pub/sub using LISTEN/NOTIFY
 pub struct PostgresPubSub {
     connection_string: String,
-    subscriptions: Arc<RwLock<Vec<String>>>,
+    subscriptions: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl PostgresPubSub {
@@ -40,24 +41,25 @@ impl PostgresPubSub {
 
         Ok(Self {
             connection_string: database_url.to_string(),
-            subscriptions: Arc::new(RwLock::new(Vec::new())),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
-    /// Sanitize channel name for PostgreSQL
-    /// Channel names must be valid identifiers
-    fn sanitize_channel(stream: &str) -> String {
-        let sanitized: String = stream
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
-            .collect();
+    /// Stable channel name for PostgreSQL LISTEN/NOTIFY.
+    ///
+    /// Channel names must be valid identifiers and <= 63 bytes. Use a fixed-length
+    /// hash to avoid collisions from sanitization and to stay under the limit.
+    fn channel_for_stream(stream: &str) -> String {
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
 
-        // Ensure it starts with a letter or underscore
-        if sanitized.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
-            format!("ch_{}", sanitized)
-        } else {
-            sanitized
+        let mut hash = FNV_OFFSET;
+        for byte in stream.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
         }
+
+        format!("oc_{:016x}", hash)
     }
 }
 
@@ -72,7 +74,7 @@ impl PubSub for PostgresPubSub {
             }
         });
 
-        let channel = Self::sanitize_channel(stream);
+        let channel = Self::channel_for_stream(stream);
 
         // Encode payload as base64 for safe transmission
         let encoded = base64_encode(payload);
@@ -86,21 +88,30 @@ impl PubSub for PostgresPubSub {
     }
 
     async fn subscribe(&self, stream: &str) -> anyhow::Result<()> {
-        let channel = Self::sanitize_channel(stream);
+        let channel = Self::channel_for_stream(stream);
 
         let mut subs = self.subscriptions.write().await;
-        if !subs.contains(&channel) {
-            subs.push(channel);
+        if let Some(existing) = subs.get(&channel) {
+            if existing != stream {
+                return Err(anyhow::anyhow!(
+                    "channel hash collision: {} maps to both '{}' and '{}'",
+                    channel,
+                    existing,
+                    stream
+                ));
+            }
+        } else {
+            subs.insert(channel, stream.to_string());
         }
 
         Ok(())
     }
 
     async fn unsubscribe(&self, stream: &str) -> anyhow::Result<()> {
-        let channel = Self::sanitize_channel(stream);
+        let channel = Self::channel_for_stream(stream);
 
         let mut subs = self.subscriptions.write().await;
-        subs.retain(|s| s != &channel);
+        subs.remove(&channel);
 
         Ok(())
     }
@@ -142,7 +153,7 @@ impl PostgresPubSub {
         // Subscribe to all channels
         {
             let subs = subscriptions.read().await;
-            for channel in subs.iter() {
+            for channel in subs.keys() {
                 client
                     .batch_execute(&format!("LISTEN {}", channel))
                     .await?;
@@ -151,25 +162,36 @@ impl PostgresPubSub {
         }
 
         // Keep track of current subscriptions
-        let mut current_subs: Vec<String> = subscriptions.read().await.clone();
+        let mut current_subs: std::collections::HashSet<String> =
+            subscriptions.read().await.keys().cloned().collect();
 
         loop {
             // Check for subscription changes
             {
                 let new_subs = subscriptions.read().await;
-                for channel in new_subs.iter() {
+                let mut to_add = Vec::new();
+                let mut to_remove = Vec::new();
+
+                for channel in new_subs.keys() {
                     if !current_subs.contains(channel) {
-                        client.batch_execute(&format!("LISTEN {}", channel)).await?;
-                        current_subs.push(channel.clone());
-                        tracing::info!("Subscribed to channel: {}", channel);
+                        to_add.push(channel.clone());
                     }
                 }
-                for channel in current_subs.clone().iter() {
-                    if !new_subs.contains(channel) {
-                        client.batch_execute(&format!("UNLISTEN {}", channel)).await?;
-                        current_subs.retain(|c| c != channel);
-                        tracing::info!("Unsubscribed from channel: {}", channel);
+                for channel in current_subs.iter() {
+                    if !new_subs.contains_key(channel) {
+                        to_remove.push(channel.clone());
                     }
+                }
+
+                for channel in to_add {
+                    client.batch_execute(&format!("LISTEN {}", channel)).await?;
+                    current_subs.insert(channel.clone());
+                    tracing::info!("Subscribed to channel: {}", channel);
+                }
+                for channel in to_remove {
+                    client.batch_execute(&format!("UNLISTEN {}", channel)).await?;
+                    current_subs.remove(&channel);
+                    tracing::info!("Unsubscribed from channel: {}", channel);
                 }
             }
 
@@ -180,7 +202,15 @@ impl PostgresPubSub {
                         Some(Ok(AsyncMessage::Notification(notification))) => {
                             let channel = notification.channel().to_string();
                             let payload = base64_decode(notification.payload());
-                            callback(channel, payload);
+                            let stream = {
+                                let subs = subscriptions.read().await;
+                                subs.get(&channel).cloned()
+                            };
+                            if let Some(stream) = stream {
+                                callback(stream, payload);
+                            } else {
+                                tracing::warn!("Received notification for unknown channel: {}", channel);
+                            }
                         }
                         Some(Ok(_)) => {
                             // Other message types (notices, etc.)
@@ -287,10 +317,22 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_channel() {
-        assert_eq!(PostgresPubSub::sanitize_channel("test"), "test");
-        assert_eq!(PostgresPubSub::sanitize_channel("test-channel"), "test_channel");
-        assert_eq!(PostgresPubSub::sanitize_channel("123"), "ch_123");
-        assert_eq!(PostgresPubSub::sanitize_channel("my.channel"), "my_channel");
+    fn test_channel_for_stream() {
+        assert_eq!(
+            PostgresPubSub::channel_for_stream("test"),
+            "oc_f9e6e6ef197c2b25"
+        );
+        assert_eq!(
+            PostgresPubSub::channel_for_stream("test-channel"),
+            "oc_35532a9354f87833"
+        );
+        assert_eq!(
+            PostgresPubSub::channel_for_stream("123"),
+            "oc_456fc2181822c4db"
+        );
+        assert_eq!(
+            PostgresPubSub::channel_for_stream("my.channel"),
+            "oc_f3e42e433c3c0e76"
+        );
     }
 }
