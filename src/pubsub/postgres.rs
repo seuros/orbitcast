@@ -1,13 +1,15 @@
 //! PostgreSQL pub/sub backend using LISTEN/NOTIFY
 //!
 //! Uses PostgreSQL's native pub/sub mechanism for cross-node broadcasting.
+//! Supports both TLS and non-TLS connections based on URL parameters.
 
 use crate::pubsub::PubSub;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio_postgres::{AsyncMessage, NoTls};
+use tokio_postgres::AsyncMessage;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 /// PostgreSQL-backed pub/sub using LISTEN/NOTIFY
 pub struct PostgresPubSub {
@@ -16,6 +18,18 @@ pub struct PostgresPubSub {
 }
 
 impl PostgresPubSub {
+    /// Create TLS connector for PostgreSQL connections
+    fn make_tls_connector() -> MakeRustlsConnect {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        MakeRustlsConnect::new(config)
+    }
+
     /// Create a new PostgreSQL pub/sub backend
     ///
     /// # Arguments
@@ -26,8 +40,9 @@ impl PostgresPubSub {
     /// let pubsub = PostgresPubSub::new("postgres://user:pass@localhost/db").await?;
     /// ```
     pub async fn new(database_url: &str) -> anyhow::Result<Self> {
-        // Verify connection works
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
+        // Verify connection works - use TLS by default for cloud databases
+        let tls = Self::make_tls_connector();
+        let (client, connection) = tokio_postgres::connect(database_url, tls).await?;
 
         // Spawn connection to keep it alive for the test
         tokio::spawn(async move {
@@ -66,7 +81,8 @@ impl PostgresPubSub {
 #[async_trait]
 impl PubSub for PostgresPubSub {
     async fn publish(&self, stream: &str, payload: &[u8]) -> anyhow::Result<()> {
-        let (client, connection) = tokio_postgres::connect(&self.connection_string, NoTls).await?;
+        let tls = Self::make_tls_connector();
+        let (client, connection) = tokio_postgres::connect(&self.connection_string, tls).await?;
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -141,14 +157,15 @@ impl PubSub for PostgresPubSub {
 impl PostgresPubSub {
     async fn run_listener<F>(
         connection_string: &str,
-        subscriptions: &Arc<RwLock<Vec<String>>>,
+        subscriptions: &Arc<RwLock<HashMap<String, String>>>,
         callback: Arc<F>,
     ) -> anyhow::Result<()>
     where
         F: Fn(String, Vec<u8>) + Send + Sync + 'static,
     {
+        let tls = Self::make_tls_connector();
         let (client, mut connection) =
-            tokio_postgres::connect(connection_string, NoTls).await?;
+            tokio_postgres::connect(connection_string, tls).await?;
 
         // Subscribe to all channels
         {
@@ -235,6 +252,7 @@ impl PostgresPubSub {
 }
 
 /// Base64 encode bytes for safe NOTIFY payload
+#[allow(dead_code)]
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
