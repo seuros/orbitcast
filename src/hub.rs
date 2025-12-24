@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
 use tracing::{debug, warn};
 
-use crate::protocol::Cargo;
+use crate::protocol::{Cargo, Outgoing};
 use crate::session::Session;
 
 /// Broadcast channel capacity per stream
@@ -34,7 +34,7 @@ pub struct Hub {
     identifiers: DashMap<String, Vec<u32>>,
 
     /// Channel to send cargo back to Mothership
-    outgoing_tx: mpsc::Sender<Cargo>,
+    outgoing_tx: mpsc::Sender<Outgoing>,
 
     /// Ping broadcast sender (all sessions receive pings)
     ping_tx: broadcast::Sender<Vec<u8>>,
@@ -42,7 +42,7 @@ pub struct Hub {
 
 impl Hub {
     /// Create a new Hub
-    pub fn new(outgoing_tx: mpsc::Sender<Cargo>) -> Self {
+    pub fn new(outgoing_tx: mpsc::Sender<Outgoing>) -> Self {
         let (ping_tx, _) = broadcast::channel(PING_CAPACITY);
 
         Self {
@@ -79,7 +79,7 @@ impl Hub {
                 match rx.recv().await {
                     Ok(payload) => {
                         let cargo = Cargo { conn_id, data: payload };
-                        if outgoing_tx.send(cargo).await.is_err() {
+                        if outgoing_tx.send(Outgoing::Cargo(cargo)).await.is_err() {
                             break;
                         }
                     }
@@ -108,12 +108,12 @@ impl Hub {
                 debug!(conn_id, stream, "aborted subscription task");
 
                 // Clean up empty streams
-                if let Some(sender) = self.streams.get(&stream) {
-                    if sender.receiver_count() == 0 {
-                        drop(sender);
-                        self.streams.remove(&stream);
-                        debug!(stream, "removed empty stream");
-                    }
+                if let Some(sender) = self.streams.get(&stream)
+                    && sender.receiver_count() == 0
+                {
+                    drop(sender);
+                    self.streams.remove(&stream);
+                    debug!(stream, "removed empty stream");
                 }
             }
         }
@@ -132,11 +132,13 @@ impl Hub {
     }
 
     /// Get session by connection ID
+    #[allow(dead_code)]
     pub fn get_session(&self, conn_id: u32) -> Option<dashmap::mapref::one::Ref<'_, u32, Session>> {
         self.sessions.get(&conn_id)
     }
 
     /// Get mutable session by connection ID
+    #[allow(dead_code)]
     pub fn get_session_mut(
         &self,
         conn_id: u32,
@@ -146,11 +148,11 @@ impl Hub {
 
     /// Subscribe connection to a stream
     pub fn subscribe_to_stream(&self, conn_id: u32, stream: &str) {
-        if let Some(subs) = self.subscriptions.get(&conn_id) {
-            if subs.contains_key(stream) {
-                debug!(conn_id, stream, "already subscribed to stream");
-                return;
-            }
+        if let Some(subs) = self.subscriptions.get(&conn_id)
+            && subs.contains_key(stream)
+        {
+            debug!(conn_id, stream, "already subscribed to stream");
+            return;
         }
 
         // Get or create broadcast sender for this stream
@@ -173,7 +175,7 @@ impl Hub {
                 match rx.recv().await {
                     Ok(payload) => {
                         let cargo = Cargo { conn_id, data: payload };
-                        if outgoing_tx.send(cargo).await.is_err() {
+                        if outgoing_tx.send(Outgoing::Cargo(cargo)).await.is_err() {
                             break;
                         }
                     }
@@ -202,10 +204,10 @@ impl Hub {
     /// Unsubscribe connection from a stream
     pub fn unsubscribe_from_stream(&self, conn_id: u32, stream: &str) {
         // Abort the forwarding task
-        if let Some(mut subs) = self.subscriptions.get_mut(&conn_id) {
-            if let Some(handle) = subs.remove(stream) {
-                handle.abort();
-            }
+        if let Some(mut subs) = self.subscriptions.get_mut(&conn_id)
+            && let Some(handle) = subs.remove(stream)
+        {
+            handle.abort();
         }
 
         if let Some(mut session) = self.sessions.get_mut(&conn_id) {
@@ -213,12 +215,12 @@ impl Hub {
         }
 
         // Clean up empty streams
-        if let Some(sender) = self.streams.get(stream) {
-            if sender.receiver_count() == 0 {
-                drop(sender);
-                self.streams.remove(stream);
-                debug!(stream, "removed empty stream");
-            }
+        if let Some(sender) = self.streams.get(stream)
+            && sender.receiver_count() == 0
+        {
+            drop(sender);
+            self.streams.remove(stream);
+            debug!(stream, "removed empty stream");
         }
 
         debug!(conn_id, stream, "unsubscribed from stream");
@@ -265,12 +267,26 @@ impl Hub {
             data: payload.to_vec(),
         };
 
-        if let Err(e) = self.outgoing_tx.send(cargo).await {
+        if let Err(e) = self.outgoing_tx.send(Outgoing::Cargo(cargo)).await {
             warn!(conn_id, error = %e, "failed to send cargo");
         }
     }
 
+    /// Disconnect a specific connection
+    pub async fn disconnect(&self, conn_id: u32, code: u16, reason: &str) {
+        let disembark = crate::protocol::Disembark {
+            conn_id,
+            code,
+            reason: reason.to_string(),
+        };
+
+        if let Err(e) = self.outgoing_tx.send(Outgoing::Disembark(disembark)).await {
+            warn!(conn_id, error = %e, "failed to send disembark");
+        }
+    }
+
     /// Set identifier for a session (after authentication)
+    #[allow(dead_code)]
     pub fn set_identifier(&self, conn_id: u32, identifier: String) {
         if let Some(mut session) = self.sessions.get_mut(&conn_id) {
             session.set_identifier(identifier.clone());
@@ -283,6 +299,7 @@ impl Hub {
     }
 
     /// Get all connection IDs for an identifier
+    #[allow(dead_code)]
     pub fn get_connections_by_identifier(&self, identifier: &str) -> Vec<u32> {
         self.identifiers
             .get(identifier)
@@ -296,11 +313,13 @@ impl Hub {
     }
 
     /// Get stream count
+    #[allow(dead_code)]
     pub fn stream_count(&self) -> usize {
         self.streams.len()
     }
 
     /// Get ping receiver count
+    #[allow(dead_code)]
     pub fn ping_receiver_count(&self) -> usize {
         self.ping_tx.receiver_count()
     }

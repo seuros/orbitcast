@@ -3,10 +3,22 @@
 //! OrbitCast uses the standard Mothership docking protocol.
 
 pub use mothership::docking::{
-    Boarding, Cargo, Disembark, Dock, MessageType, Moored, ProtocolError, VERSION,
-    decode_cargo, decode_header, encode_boarding, encode_cargo, encode_disembark,
-    encode_dock, encode_header, encode_moored,
+    Boarding, Cargo, Disembark, Dock, MessageType, Moored, VERSION, decode_cargo,
+    decode_header, encode_cargo, encode_disembark, encode_dock,
 };
+
+#[derive(Debug)]
+pub enum Outgoing {
+    Cargo(Cargo),
+    Disembark(Disembark),
+}
+
+pub fn encode_outgoing(message: &Outgoing) -> Vec<u8> {
+    match message {
+        Outgoing::Cargo(cargo) => encode_cargo(cargo),
+        Outgoing::Disembark(disembark) => encode_disembark(disembark),
+    }
+}
 
 #[cfg(test)]
 mod tests {

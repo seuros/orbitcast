@@ -52,7 +52,7 @@ tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 
 # Docking protocol
-mothership = { version = "0.0.21", default-features = false }
+mothership = { version = "0.0.25", default-features = false }
 
 # Pin rcgen to avoid x509-parser incompatibility
 rcgen = "=0.14.5"

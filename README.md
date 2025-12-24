@@ -9,6 +9,9 @@ OrbitCast handles ActionCable WebSocket connections, multiplexed through Mothers
 ```
 Clients (WS) → Mothership → Unix Socket → OrbitCast
                                               ↓
+                                          RPC
+                                     (anycable-rails)
+                                              ↓
                                          Pub/Sub
                                     (PostgreSQL or Memory)
 ```
@@ -22,13 +25,10 @@ cargo install orbitcast
 # cargo install orbitcast --features postgres
 
 # Development (single-node, in-memory)
-cargo install orbitcast --features memory
-# If you want memory without compiling PostgreSQL deps:
-# cargo install orbitcast --no-default-features --features memory
+cargo install orbitcast --no-default-features --features memory
 ```
 
-> At least one backend is required. Features are additive; when both are enabled,
-> the binary prefers `memory`.
+> Exactly one backend is required. Use `--no-default-features` to disable the default PostgreSQL backend when using `memory`.
 
 ## Configuration
 
@@ -48,6 +48,9 @@ config = { database_url = "postgres://localhost/myapp" }
 |-----|-------------|
 | `database_url` | PostgreSQL connection (required for `postgres` feature) |
 | `ping_interval` | Seconds between pings (default: 3) |
+| `rpc_host` | AnyCable RPC host (default: `127.0.0.1:50051`) |
+| `rpc_request_timeout_ms` | RPC request timeout in ms (optional) |
+| `rpc_headers` | Comma-separated header allowlist (default: `cookie`, `*` for all) |
 
 ### Environment Variables
 
@@ -79,6 +82,21 @@ Uses `tokio::sync::broadcast`. Single process only. Good for development.
 ```bash
 orbitcast --help
 orbitcast --log-level debug
+```
+
+## AnyCable RPC
+
+OrbitCast speaks the AnyCable RPC protocol. Run the `anycable-rails` RPC server and
+point OrbitCast to it via `rpc_host`.
+
+Example ship config:
+
+```toml
+[[bays.websocket]]
+name = "orbitcast"
+command = "orbitcast"
+routes = [{ bind = "ws", pattern = "/cable" }]
+config = { rpc_host = "127.0.0.1:50051", database_url = "postgres://localhost/myapp" }
 ```
 
 ## License

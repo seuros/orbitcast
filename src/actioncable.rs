@@ -29,11 +29,15 @@ pub enum ClientCommand {
 /// Server-to-client messages
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
+    #[allow(dead_code)]
     Welcome { sid: String },
     Ping { timestamp: i64 },
+    #[allow(dead_code)]
     ConfirmSubscription { identifier: String },
+    #[allow(dead_code)]
     RejectSubscription { identifier: String },
     Message { identifier: String, message: Value },
+    #[allow(dead_code)]
     Disconnect { reason: String, reconnect: bool },
 }
 

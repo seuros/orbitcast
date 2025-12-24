@@ -32,8 +32,8 @@ impl MemoryPubSub {
     /// Create a new in-memory pub/sub backend
     ///
     /// # Example
-    /// ```
-    /// use orbitcast::MemoryPubSub;
+    /// ```ignore
+    /// use crate::pubsub::MemoryPubSub;
     ///
     /// let pubsub = MemoryPubSub::new();
     /// ```

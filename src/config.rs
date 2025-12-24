@@ -17,11 +17,18 @@ pub struct Config {
     /// Socket directory
     pub socket_dir: PathBuf,
     /// Routes this ship handles (received from Mothership)
+    #[allow(dead_code)]
     pub routes: Vec<String>,
     /// PostgreSQL connection string (from Moored.config)
     pub database_url: Option<String>,
     /// Ping interval in seconds (default: 3)
     pub ping_interval: u64,
+    /// AnyCable RPC host (default: 127.0.0.1:50051)
+    pub rpc_host: String,
+    /// RPC request timeout in milliseconds (optional)
+    pub rpc_request_timeout_ms: Option<u64>,
+    /// Header allowlist for RPC (lowercased). Empty means forward all.
+    pub rpc_headers: Vec<String>,
 }
 
 impl Config {
@@ -45,6 +52,9 @@ impl Config {
             routes: Vec::new(),
             database_url: None,
             ping_interval: 3,
+            rpc_host: "127.0.0.1:50051".to_string(),
+            rpc_request_timeout_ms: None,
+            rpc_headers: vec!["cookie".to_string()],
         })
     }
 
@@ -54,9 +64,32 @@ impl Config {
             self.database_url = Some(url.clone());
         }
 
-        if let Some(interval) = config.get("ping_interval") {
-            if let Ok(secs) = interval.parse() {
-                self.ping_interval = secs;
+        if let Some(interval) = config.get("ping_interval")
+            && let Ok(secs) = interval.parse()
+        {
+            self.ping_interval = secs;
+        }
+
+        if let Some(host) = config.get("rpc_host") {
+            self.rpc_host = host.clone();
+        }
+
+        if let Some(timeout) = config.get("rpc_request_timeout_ms")
+            && let Ok(ms) = timeout.parse::<u64>()
+        {
+            self.rpc_request_timeout_ms = if ms == 0 { None } else { Some(ms) };
+        }
+
+        if let Some(headers) = config.get("rpc_headers") {
+            let trimmed = headers.trim();
+            if trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+                self.rpc_headers.clear();
+            } else {
+                self.rpc_headers = trimmed
+                    .split(',')
+                    .map(|h| h.trim().to_lowercase())
+                    .filter(|h| !h.is_empty())
+                    .collect();
             }
         }
     }

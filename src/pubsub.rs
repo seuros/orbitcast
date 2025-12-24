@@ -5,10 +5,10 @@
 //!
 //! # Features
 //!
-//! At least one backend must be enabled at compile time:
+//! Exactly one backend must be enabled at compile time:
 //!
 //! - `postgres` - PostgreSQL LISTEN/NOTIFY for multi-node deployments
-//! - `memory` - In-memory broadcast for single-node/development (preferred if both enabled)
+//! - `memory` - In-memory broadcast for single-node/development
 
 #[cfg(feature = "postgres")]
 mod postgres;
@@ -33,6 +33,7 @@ pub trait PubSub: Send + Sync {
     /// Publish a message to a stream
     ///
     /// All nodes listening on this stream will receive the message.
+    #[allow(dead_code)]
     async fn publish(&self, stream: &str, payload: &[u8]) -> anyhow::Result<()>;
 
     /// Subscribe to a stream

@@ -2362,9 +2362,9 @@ dependencies = [
 
 [[package]]
 name = "mothership"
-version = "0.0.21"
+version = "0.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4e0ed0925f437c24a4c3e03efac964f2f0266ae22cfc4b21851ba68b1f97d52"
+checksum = "5f02b690fc1aec3ed39eacce855b093caa73571cd154c85d2f66dd9565e2d261"
 dependencies = [
  "anyhow",
  "base64",
@@ -2377,6 +2377,8 @@ dependencies = [
  "nix 0.30.1",
  "rama",
  "ratatui",
+ "ratatui-core",
+ "ratatui-widgets",
  "rcgen",
  "regex",
  "reqwest",
