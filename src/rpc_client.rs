@@ -63,6 +63,10 @@ impl AnyCableRpc {
         Res: prost::Message + Default + 'static,
     {
         let mut grpc = Grpc::new(self.channel.clone());
+        grpc
+            .ready()
+            .await
+            .context("AnyCable RPC service not ready")?;
         let mut request = Request::new(message);
         if let Some(timeout) = self.timeout {
             request.set_timeout(timeout);
