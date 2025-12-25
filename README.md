@@ -87,6 +87,11 @@ Uses `tokio::sync::broadcast`. Single process only. Good for development.
 - No persistence
 - Lagging receivers lose messages
 
+### Redis / NATS (not supported here)
+
+OrbitCast requires PostgreSQL for multi-node pub/sub. If you need Redis or NATS
+backends, use AnyCable-Go directly as your WebSocket server instead of OrbitCast.
+
 ## CLI
 
 ```bash
@@ -98,6 +103,8 @@ orbitcast --log-level debug
 
 OrbitCast speaks the AnyCable RPC protocol. Run the `anycable-rails` RPC server and
 point OrbitCast to it via `rpc_host`.
+
+Protocol compatibility: AnyCable RPC protocol 1.6.2+.
 
 Example ship config:
 
