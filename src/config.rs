@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::streams::StreamsConfig;
+
 /// OrbitCast configuration
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -29,6 +31,8 @@ pub struct Config {
     pub rpc_request_timeout_ms: Option<u64>,
     /// Header allowlist for RPC (lowercased). Empty means forward all.
     pub rpc_headers: Vec<String>,
+    /// Signed streams configuration
+    pub streams: StreamsConfig,
 }
 
 impl Config {
@@ -55,6 +59,7 @@ impl Config {
             rpc_host: "127.0.0.1:50051".to_string(),
             rpc_request_timeout_ms: None,
             rpc_headers: vec!["cookie".to_string()],
+            streams: StreamsConfig::default(),
         })
     }
 
@@ -91,6 +96,47 @@ impl Config {
                     .filter(|h| !h.is_empty())
                     .collect();
             }
+        }
+
+        // Signed streams configuration
+        if let Some(secret) = config.get("streams_secret")
+            && !secret.is_empty()
+        {
+            self.streams.secret = Some(secret.clone());
+        }
+
+        if let Some(public) = config.get("public_streams") {
+            self.streams.public = public.eq_ignore_ascii_case("true") || public == "1";
+        }
+
+        if let Some(whisper) = config.get("streams_whisper") {
+            self.streams.whisper = whisper.eq_ignore_ascii_case("true") || whisper == "1";
+        }
+
+        if let Some(presence) = config.get("streams_presence") {
+            self.streams.presence = presence.eq_ignore_ascii_case("true") || presence == "1";
+        }
+
+        // Turbo Streams
+        if let Some(turbo) = config.get("turbo_streams") {
+            self.streams.turbo = turbo.eq_ignore_ascii_case("true") || turbo == "1";
+        }
+
+        if let Some(secret) = config.get("turbo_streams_secret")
+            && !secret.is_empty()
+        {
+            self.streams.turbo_secret = Some(secret.clone());
+        }
+
+        // CableReady
+        if let Some(cable_ready) = config.get("cable_ready_streams") {
+            self.streams.cable_ready = cable_ready.eq_ignore_ascii_case("true") || cable_ready == "1";
+        }
+
+        if let Some(secret) = config.get("cable_ready_secret")
+            && !secret.is_empty()
+        {
+            self.streams.cable_ready_secret = Some(secret.clone());
         }
     }
 

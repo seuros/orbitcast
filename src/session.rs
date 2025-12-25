@@ -4,6 +4,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// State key for presence stream (matches AnyCable's PRESENCE_STREAM_STATE)
+pub const PRESENCE_STREAM_STATE: &str = "$p";
+
+/// State key for whisper stream (matches AnyCable's WHISPER_STREAM_STATE)
+pub const WHISPER_STREAM_STATE: &str = "$w";
+
 /// WebSocket session
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -30,6 +36,10 @@ pub struct Session {
     pub cstate: HashMap<String, String>,
     /// Subscription state from RPC (identifier -> state map)
     pub istate: HashMap<String, HashMap<String, String>>,
+    /// Presence streams per subscription identifier
+    pub presence_streams: HashMap<String, String>,
+    /// Whisper streams per subscription identifier
+    pub whisper_streams: HashMap<String, String>,
 }
 
 #[allow(dead_code)]
@@ -53,6 +63,8 @@ impl Session {
             subscription_streams: HashMap::new(),
             cstate: HashMap::new(),
             istate: HashMap::new(),
+            presence_streams: HashMap::new(),
+            whisper_streams: HashMap::new(),
         }
     }
 
@@ -126,7 +138,11 @@ impl Session {
     }
 
     /// Add streams for a subscription identifier, returning newly-added streams
-    pub fn add_subscription_streams(&mut self, identifier: &str, streams: &[String]) -> Vec<String> {
+    pub fn add_subscription_streams(
+        &mut self,
+        identifier: &str,
+        streams: &[String],
+    ) -> Vec<String> {
         let entry = self
             .subscription_streams
             .entry(identifier.to_string())
@@ -198,5 +214,40 @@ impl Session {
             .iter()
             .find(|(k, _)| k.to_lowercase() == name_lower)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Set presence stream for a subscription identifier
+    pub fn set_presence_stream(&mut self, identifier: &str, stream: String) {
+        self.presence_streams.insert(identifier.to_string(), stream);
+    }
+
+    /// Get presence stream for a subscription identifier
+    pub fn get_presence_stream(&self, identifier: &str) -> Option<&str> {
+        self.presence_streams.get(identifier).map(|s| s.as_str())
+    }
+
+    /// Remove presence stream for a subscription identifier
+    pub fn remove_presence_stream(&mut self, identifier: &str) -> Option<String> {
+        self.presence_streams.remove(identifier)
+    }
+
+    /// Get all presence streams (for disconnect cleanup)
+    pub fn all_presence_streams(&self) -> Vec<String> {
+        self.presence_streams.values().cloned().collect()
+    }
+
+    /// Set whisper stream for a subscription identifier
+    pub fn set_whisper_stream(&mut self, identifier: &str, stream: String) {
+        self.whisper_streams.insert(identifier.to_string(), stream);
+    }
+
+    /// Get whisper stream for a subscription identifier
+    pub fn get_whisper_stream(&self, identifier: &str) -> Option<&str> {
+        self.whisper_streams.get(identifier).map(|s| s.as_str())
+    }
+
+    /// Remove whisper stream for a subscription identifier
+    pub fn remove_whisper_stream(&mut self, identifier: &str) -> Option<String> {
+        self.whisper_streams.remove(identifier)
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "orbitcast"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
@@ -50,6 +50,13 @@ clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
+
+# Crypto for signed streams
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+hex = "0.4"
+base64 = "0.22"
 
 # Docking protocol
 mothership = { version = ">=0.0.31, <0.1.0", default-features = false }

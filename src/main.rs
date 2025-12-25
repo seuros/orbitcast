@@ -16,11 +16,13 @@ compile_error!(
 mod actioncable;
 mod config;
 mod hub;
+mod presence;
 mod protocol;
 mod pubsub;
 mod rpc;
 mod rpc_client;
 mod session;
+mod streams;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,11 +38,13 @@ use crate::{
     actioncable::{ClientCommand, ServerMessage},
     config::Config,
     hub::Hub,
+    presence::{PresenceStore, broadcast_presence_event},
     protocol::{MessageType, Moored, Outgoing},
     pubsub::PubSub,
     rpc::anycable::{CommandMessage, Env, Status},
     rpc_client::AnyCableRpc,
     session::Session,
+    streams::StreamsController,
 };
 
 #[cfg(feature = "postgres")]
@@ -364,6 +368,36 @@ async fn main() -> anyhow::Result<()> {
     // Create hub
     let hub = Arc::new(Hub::new(outgoing_tx));
 
+    // Initialize presence store
+    let presence_ttl = 15; // TODO: make configurable
+    let presence = Arc::new(PresenceStore::new(presence_ttl));
+
+    // Spawn presence expiration task
+    {
+        let presence_clone = presence.clone();
+        let hub_clone = hub.clone();
+        tokio::spawn(async move {
+            presence::spawn_expiration_task(
+                presence_clone,
+                hub_clone,
+                Duration::from_secs(5), // Check every 5 seconds
+            );
+        });
+    }
+
+    // Initialize signed streams controller (for $pubsub, Turbo, CableReady)
+    let streams_controller = if config.streams.is_enabled() {
+        info!(
+            public = config.streams.public,
+            turbo = config.streams.turbo,
+            cable_ready = config.streams.cable_ready,
+            "Signed streams enabled"
+        );
+        Some(Arc::new(StreamsController::new(config.streams.clone())))
+    } else {
+        None
+    };
+
     // Spawn pub/sub listener if available
     if let Some(ref ps) = pubsub {
         let ps_clone = ps.clone();
@@ -534,6 +568,66 @@ async fn main() -> anyhow::Result<()> {
 
                     match parsed {
                         ClientCommand::Subscribe { identifier } => {
+                            // Check if this is a signed stream subscription (handled locally)
+                            if let Some(ref controller) = streams_controller
+                                && controller.handles(&identifier)
+                            {
+                                match controller.resolve(&identifier) {
+                                    Ok(result) => {
+                                        debug!(
+                                            conn_id,
+                                            stream = %result.stream,
+                                            "Signed stream subscription"
+                                        );
+
+                                        // Send confirmation
+                                        let confirm = ServerMessage::ConfirmSubscription {
+                                            identifier: identifier.clone(),
+                                        };
+                                        hub.send(conn_id, &actioncable::encode(&confirm)).await;
+
+                                        // Subscribe to the stream
+                                        if let Some(mut session) = hub.get_session_mut(conn_id) {
+                                            session.subscribe(identifier.clone());
+                                            session.add_subscription_streams(&identifier, std::slice::from_ref(&result.stream));
+
+                                            // Track presence stream if enabled
+                                            if result.presence {
+                                                session.set_presence_stream(&identifier, result.stream.clone());
+                                            }
+
+                                            // Track whisper stream if enabled
+                                            if result.whisper {
+                                                session.set_whisper_stream(&identifier, result.stream.clone());
+                                            }
+                                        }
+
+                                        hub.subscribe_to_stream(conn_id, &result.stream);
+
+                                        // Subscribe to pub/sub if needed
+                                        if let Some(ref ps) = pubsub
+                                            && hub.stream_subscriber_count(&result.stream) == 1
+                                            && let Err(e) = ps.subscribe(&result.stream).await
+                                        {
+                                            warn!(
+                                                stream = %result.stream,
+                                                error = %e,
+                                                "Failed to subscribe pubsub"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!(conn_id, error = %e, "Signed stream verification failed");
+                                        let reject = ServerMessage::RejectSubscription {
+                                            identifier: identifier.clone(),
+                                        };
+                                        hub.send(conn_id, &actioncable::encode(&reject)).await;
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // Standard RPC subscription
                             let command = "subscribe";
                             let data = String::new();
 
@@ -599,15 +693,25 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if status == Status::Success {
-                                let (added_streams, removed_streams) = if let Some(mut session) =
+                                let (added_streams, removed_streams, presence_stream) = if let Some(mut session) =
                                     hub.get_session_mut(conn_id)
                                 {
                                     session.subscribe(identifier.clone());
 
+                                    let mut pstream = None;
                                     if let Some(env) = response.env {
-                                        session.set_cstate(env.cstate);
+                                        session.set_cstate(env.cstate.clone());
                                         if !env.istate.is_empty() {
-                                            session.set_istate(&identifier, env.istate);
+                                            session.set_istate(&identifier, env.istate.clone());
+                                            // Check for presence stream in istate
+                                            if let Some(ps) = env.istate.get(crate::session::PRESENCE_STREAM_STATE) {
+                                                session.set_presence_stream(&identifier, ps.clone());
+                                                pstream = Some(ps.clone());
+                                            }
+                                            // Check for whisper stream in istate
+                                            if let Some(ws) = env.istate.get(crate::session::WHISPER_STREAM_STATE) {
+                                                session.set_whisper_stream(&identifier, ws.clone());
+                                            }
                                         }
                                     }
 
@@ -627,9 +731,9 @@ async fn main() -> anyhow::Result<()> {
                                         session.add_subscription_streams(&identifier, &response.streams)
                                     };
 
-                                    (added, removed)
+                                    (added, removed, pstream)
                                 } else {
-                                    (Vec::new(), Vec::new())
+                                    (Vec::new(), Vec::new(), None)
                                 };
 
                                 for stream in added_streams {
@@ -658,6 +762,26 @@ async fn main() -> anyhow::Result<()> {
                                             "Failed to unsubscribe pubsub"
                                         );
                                     }
+                                }
+
+                                // Handle presence join from RPC response
+                                if let Some(ref p) = response.presence
+                                    && let Some(ref pstream) = presence_stream
+                                {
+                                    let session_id = conn_id.to_string();
+                                    let presence_id = p.id.clone();
+                                    let info: serde_json::Value = if p.info.is_empty() {
+                                        serde_json::Value::Null
+                                    } else {
+                                        serde_json::from_str(&p.info).unwrap_or(serde_json::Value::Null)
+                                    };
+
+                                    if let Some(event) = presence.join(pstream, &session_id, &presence_id, info) {
+                                        broadcast_presence_event(&hub, pstream, &event).await;
+                                    }
+
+                                    // Subscribe session to presence stream for broadcasts
+                                    hub.subscribe_to_stream(conn_id, pstream);
                                 }
                             }
                         }
@@ -727,10 +851,16 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if status == Status::Success {
-                                let (added_streams, removed_streams) = if let Some(mut session) =
+                                let (added_streams, removed_streams, presence_stream) = if let Some(mut session) =
                                     hub.get_session_mut(conn_id)
                                 {
                                     session.unsubscribe(&identifier);
+
+                                    // Get presence stream before removing
+                                    let pstream = session.remove_presence_stream(&identifier);
+
+                                    // Remove whisper stream
+                                    session.remove_whisper_stream(&identifier);
 
                                     if let Some(env) = response.env {
                                         session.set_cstate(env.cstate);
@@ -756,9 +886,9 @@ async fn main() -> anyhow::Result<()> {
                                         session.add_subscription_streams(&identifier, &response.streams)
                                     };
 
-                                    (added, removed)
+                                    (added, removed, pstream)
                                 } else {
-                                    (Vec::new(), Vec::new())
+                                    (Vec::new(), Vec::new(), None)
                                 };
 
                                 for stream in added_streams {
@@ -787,6 +917,15 @@ async fn main() -> anyhow::Result<()> {
                                             "Failed to unsubscribe pubsub"
                                         );
                                     }
+                                }
+
+                                // Handle presence leave on unsubscribe
+                                if let Some(pstream) = presence_stream {
+                                    let session_id = conn_id.to_string();
+                                    if let Some(event) = presence.leave(&pstream, &session_id) {
+                                        broadcast_presence_event(&hub, &pstream, &event).await;
+                                    }
+                                    hub.unsubscribe_from_stream(conn_id, &pstream);
                                 }
                             }
                         }
@@ -864,6 +1003,134 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         }
+                        ClientCommand::Join {
+                            identifier,
+                            presence: presence_data,
+                        } => {
+                            // Get presence stream from session
+                            let presence_stream = match hub.get_session(conn_id) {
+                                Some(session) => {
+                                    session.get_presence_stream(&identifier).map(|s| s.to_string())
+                                }
+                                None => {
+                                    warn!(conn_id, "Received join for unknown session");
+                                    continue;
+                                }
+                            };
+
+                            let Some(pstream) = presence_stream else {
+                                warn!(conn_id, identifier, "No presence stream for subscription");
+                                continue;
+                            };
+
+                            // Get presence data from command or fall back to connection identifiers
+                            let (presence_id, info) = match presence_data {
+                                Some(p) => {
+                                    (p.id, p.info.unwrap_or(serde_json::Value::Null))
+                                }
+                                None => {
+                                    let id = hub
+                                        .get_session(conn_id)
+                                        .and_then(|s| s.connection_identifiers.clone())
+                                        .unwrap_or_else(|| conn_id.to_string());
+                                    (id, serde_json::Value::Null)
+                                }
+                            };
+
+                            let session_id = conn_id.to_string();
+                            if let Some(event) =
+                                presence.join(&pstream, &session_id, &presence_id, info)
+                            {
+                                broadcast_presence_event(&hub, &pstream, &event).await;
+                            }
+                        }
+                        ClientCommand::Leave { identifier } => {
+                            // Get presence stream from session
+                            let presence_stream = match hub.get_session(conn_id) {
+                                Some(session) => {
+                                    session.get_presence_stream(&identifier).map(|s| s.to_string())
+                                }
+                                None => {
+                                    warn!(conn_id, "Received leave for unknown session");
+                                    continue;
+                                }
+                            };
+
+                            let Some(pstream) = presence_stream else {
+                                warn!(conn_id, identifier, "No presence stream for subscription");
+                                continue;
+                            };
+
+                            let session_id = conn_id.to_string();
+                            if let Some(event) = presence.leave(&pstream, &session_id) {
+                                broadcast_presence_event(&hub, &pstream, &event).await;
+                            }
+                        }
+                        ClientCommand::Presence { identifier } => {
+                            // Get presence stream from session
+                            let presence_stream = match hub.get_session(conn_id) {
+                                Some(session) => {
+                                    session.get_presence_stream(&identifier).map(|s| s.to_string())
+                                }
+                                None => {
+                                    warn!(conn_id, "Received presence query for unknown session");
+                                    continue;
+                                }
+                            };
+
+                            let Some(pstream) = presence_stream else {
+                                warn!(conn_id, identifier, "No presence stream for subscription");
+                                continue;
+                            };
+
+                            let info = presence.info(&pstream);
+                            let msg = actioncable::ServerMessage::Message {
+                                identifier: identifier.clone(),
+                                message: serde_json::json!({
+                                    "type": "presence",
+                                    "info": info
+                                }),
+                            };
+                            hub.send(conn_id, &actioncable::encode(&msg)).await;
+                        }
+                        ClientCommand::Whisper { identifier, data } => {
+                            // Get whisper stream from session
+                            let whisper_stream = match hub.get_session(conn_id) {
+                                Some(session) => {
+                                    session.get_whisper_stream(&identifier).map(|s| s.to_string())
+                                }
+                                None => {
+                                    warn!(conn_id, "Received whisper for unknown session");
+                                    continue;
+                                }
+                            };
+
+                            let Some(wstream) = whisper_stream else {
+                                warn!(conn_id, identifier, "No whisper stream for subscription");
+                                continue;
+                            };
+
+                            // Parse data as JSON
+                            let message: serde_json::Value = match serde_json::from_str(&data) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(conn_id, error = %e, "Invalid whisper data");
+                                    continue;
+                                }
+                            };
+
+                            // Broadcast excluding sender
+                            let broadcast_msg = actioncable::ServerMessage::Message {
+                                identifier: identifier.clone(),
+                                message,
+                            };
+                            hub.broadcast_excluding(
+                                &wstream,
+                                &actioncable::encode(&broadcast_msg),
+                                conn_id,
+                            )
+                            .await;
+                        }
                     }
                 }
 
@@ -875,6 +1142,13 @@ async fn main() -> anyhow::Result<()> {
                         reason = %disembark.reason,
                         "Connection disembarked"
                     );
+
+                    // Clean up presence for all subscriptions before RPC disconnect
+                    let session_id = disembark.conn_id.to_string();
+                    let presence_events = presence.remove_session(&session_id);
+                    for (stream, event) in presence_events {
+                        broadcast_presence_event(&hub, &stream, &event).await;
+                    }
 
                     rpc_disconnect(&rpc, &hub, disembark.conn_id, &config).await;
                     hub.remove_session(disembark.conn_id);

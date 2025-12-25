@@ -2619,12 +2619,15 @@ dependencies = [
 
 [[package]]
 name = "orbitcast"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "clap",
  "dashmap",
+ "hex",
+ "hmac",
  "mothership",
  "native-tls",
  "postgres-native-tls",
@@ -2633,6 +2636,8 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",

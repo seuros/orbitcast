@@ -248,6 +248,34 @@ impl Hub {
         }
     }
 
+    /// Broadcast message to all subscribers of a stream, excluding sender
+    /// Used for whisper messages where the sender should not receive their own message
+    pub async fn broadcast_excluding(&self, stream: &str, payload: &[u8], exclude_conn_id: u32) {
+        let receivers: Vec<u32> = self
+            .subscriptions
+            .iter()
+            .filter(|entry| {
+                *entry.key() != exclude_conn_id && entry.value().contains_key(stream)
+            })
+            .map(|entry| *entry.key())
+            .collect();
+
+        for conn_id in &receivers {
+            let cargo = Cargo {
+                conn_id: *conn_id,
+                data: payload.to_vec(),
+            };
+            let _ = self.outgoing_tx.send(Outgoing::Cargo(cargo)).await;
+        }
+
+        debug!(
+            stream,
+            receivers = receivers.len(),
+            excluded = exclude_conn_id,
+            "broadcast_excluding sent"
+        );
+    }
+
     /// Broadcast ping to all sessions
     pub fn broadcast_ping(&self, payload: &[u8]) {
         match self.ping_tx.send(payload.to_vec()) {

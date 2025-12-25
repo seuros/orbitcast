@@ -6,6 +6,10 @@
 //! - `subscribe`: Join a channel
 //! - `unsubscribe`: Leave a channel
 //! - `message`: Send data to a channel
+//! - `join`: Declare presence in a channel
+//! - `leave`: Remove presence from a channel
+//! - `presence`: Query current presence list
+//! - `whisper`: Send ephemeral message (excluded from sender)
 //!
 //! ## Server Messages
 //! - `welcome`: Connection established
@@ -17,28 +21,72 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Presence data for join command
+#[derive(Debug, Clone, Deserialize)]
+pub struct PresenceData {
+    pub id: String,
+    #[serde(default)]
+    pub info: Option<Value>,
+}
+
 /// Client-to-server commands
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ClientCommand {
-    Subscribe { identifier: String },
-    Unsubscribe { identifier: String },
-    Message { identifier: String, data: String },
+    Subscribe {
+        identifier: String,
+    },
+    Unsubscribe {
+        identifier: String,
+    },
+    Message {
+        identifier: String,
+        data: String,
+    },
+    Join {
+        identifier: String,
+        #[serde(default)]
+        presence: Option<PresenceData>,
+    },
+    Leave {
+        identifier: String,
+    },
+    Presence {
+        identifier: String,
+    },
+    Whisper {
+        identifier: String,
+        data: String,
+    },
 }
 
 /// Server-to-client messages
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
     #[allow(dead_code)]
-    Welcome { sid: String },
-    Ping { timestamp: i64 },
+    Welcome {
+        sid: String,
+    },
+    Ping {
+        timestamp: i64,
+    },
     #[allow(dead_code)]
-    ConfirmSubscription { identifier: String },
+    ConfirmSubscription {
+        identifier: String,
+    },
     #[allow(dead_code)]
-    RejectSubscription { identifier: String },
-    Message { identifier: String, message: Value },
+    RejectSubscription {
+        identifier: String,
+    },
+    Message {
+        identifier: String,
+        message: Value,
+    },
     #[allow(dead_code)]
-    Disconnect { reason: String, reconnect: bool },
+    Disconnect {
+        reason: String,
+        reconnect: bool,
+    },
 }
 
 /// Internal representation for serialization
@@ -231,5 +279,76 @@ mod tests {
         assert_eq!(json["type"], "disconnect");
         assert_eq!(json["reason"], "server_restart");
         assert_eq!(json["reconnect"], true);
+    }
+
+    #[test]
+    fn test_parse_join_with_presence() {
+        let json = br#"{"command":"join","identifier":"chat_1","presence":{"id":"user_42","info":{"name":"Marissa"}}}"#;
+        let cmd = parse_command(json).unwrap();
+        match cmd {
+            ClientCommand::Join {
+                identifier,
+                presence,
+            } => {
+                assert_eq!(identifier, "chat_1");
+                let p = presence.unwrap();
+                assert_eq!(p.id, "user_42");
+                assert_eq!(p.info.unwrap()["name"], "Marissa");
+            }
+            _ => panic!("expected Join"),
+        }
+    }
+
+    #[test]
+    fn test_parse_join_without_presence() {
+        let json = br#"{"command":"join","identifier":"chat_1"}"#;
+        let cmd = parse_command(json).unwrap();
+        match cmd {
+            ClientCommand::Join {
+                identifier,
+                presence,
+            } => {
+                assert_eq!(identifier, "chat_1");
+                assert!(presence.is_none());
+            }
+            _ => panic!("expected Join"),
+        }
+    }
+
+    #[test]
+    fn test_parse_leave() {
+        let json = br#"{"command":"leave","identifier":"chat_1"}"#;
+        let cmd = parse_command(json).unwrap();
+        match cmd {
+            ClientCommand::Leave { identifier } => {
+                assert_eq!(identifier, "chat_1");
+            }
+            _ => panic!("expected Leave"),
+        }
+    }
+
+    #[test]
+    fn test_parse_presence() {
+        let json = br#"{"command":"presence","identifier":"chat_1"}"#;
+        let cmd = parse_command(json).unwrap();
+        match cmd {
+            ClientCommand::Presence { identifier } => {
+                assert_eq!(identifier, "chat_1");
+            }
+            _ => panic!("expected Presence"),
+        }
+    }
+
+    #[test]
+    fn test_parse_whisper() {
+        let json = br#"{"command":"whisper","identifier":"chat_1","data":"{\"type\":\"typing\"}"}"#;
+        let cmd = parse_command(json).unwrap();
+        match cmd {
+            ClientCommand::Whisper { identifier, data } => {
+                assert_eq!(identifier, "chat_1");
+                assert!(data.contains("typing"));
+            }
+            _ => panic!("expected Whisper"),
+        }
     }
 }

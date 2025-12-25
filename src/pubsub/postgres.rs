@@ -109,7 +109,7 @@ impl PostgresPubSub {
     }
 
     fn sslmode_from_url(connection_string: &str) -> Option<SslMode> {
-        let query = connection_string.splitn(2, '?').nth(1)?;
+        let query = connection_string.split_once('?')?.1;
         for pair in query.split('&') {
             if pair.is_empty() {
                 continue;
