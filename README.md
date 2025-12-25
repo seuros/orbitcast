@@ -68,6 +68,16 @@ Set automatically by Mothership:
 
 Uses `LISTEN/NOTIFY` for cross-node broadcasting. Required for multi-instance deployments.
 
+#### TLS / `sslmode`
+
+OrbitCast honors the `sslmode` query param in `database_url`:
+
+- `disable`: non-TLS only
+- `allow`: try non-TLS, then TLS
+- `prefer` (default): try TLS, then non-TLS
+- `require`: TLS only
+- `verify-ca`, `verify-full`: TLS only (certificate verification uses system roots)
+
 ### Memory (`--features memory`)
 
 Uses `tokio::sync::broadcast`. Single process only. Good for development.

@@ -8,8 +8,48 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::task::{Context, Poll};
 use tokio_postgres::AsyncMessage;
+use tokio_postgres::NoTls;
 use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_postgres_rustls::RustlsStream;
+
+type TlsConnection = tokio_postgres::Connection<tokio_postgres::Socket, RustlsStream<tokio_postgres::Socket>>;
+type NoTlsConnection = tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>;
+
+enum PgConnection {
+    Tls(TlsConnection),
+    NoTls(NoTlsConnection),
+}
+
+impl PgConnection {
+    fn poll_message(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<AsyncMessage, tokio_postgres::Error>>> {
+        match self {
+            PgConnection::Tls(conn) => conn.poll_message(cx),
+            PgConnection::NoTls(conn) => conn.poll_message(cx),
+        }
+    }
+
+    async fn run(self) -> Result<(), tokio_postgres::Error> {
+        match self {
+            PgConnection::Tls(conn) => conn.await,
+            PgConnection::NoTls(conn) => conn.await,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SslMode {
+    Disable,
+    Allow,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
 
 /// PostgreSQL-backed pub/sub using LISTEN/NOTIFY
 pub struct PostgresPubSub {
@@ -40,13 +80,12 @@ impl PostgresPubSub {
     /// let pubsub = PostgresPubSub::new("postgres://user:pass@localhost/db").await?;
     /// ```
     pub async fn new(database_url: &str) -> anyhow::Result<Self> {
-        // Verify connection works - use TLS by default for cloud databases
-        let tls = Self::make_tls_connector();
-        let (client, connection) = tokio_postgres::connect(database_url, tls).await?;
+        // Verify connection works - use TLS by default with fallback based on sslmode
+        let (client, connection) = Self::connect_with_sslmode(database_url).await?;
 
         // Spawn connection to keep it alive for the test
         tokio::spawn(async move {
-            if let Err(e) = connection.await {
+            if let Err(e) = connection.run().await {
                 tracing::error!("Connection error during init: {}", e);
             }
         });
@@ -76,16 +115,96 @@ impl PostgresPubSub {
 
         format!("oc_{:016x}", hash)
     }
+
+    fn sslmode_from_url(connection_string: &str) -> Option<SslMode> {
+        let query = connection_string.splitn(2, '?').nth(1)?;
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            if !key.eq_ignore_ascii_case("sslmode") {
+                continue;
+            }
+
+            let value = parts.next().unwrap_or("").to_ascii_lowercase();
+            return match value.as_str() {
+                "disable" => Some(SslMode::Disable),
+                "allow" => Some(SslMode::Allow),
+                "prefer" => Some(SslMode::Prefer),
+                "require" => Some(SslMode::Require),
+                "verify-ca" | "verify_ca" => Some(SslMode::VerifyCa),
+                "verify-full" | "verify_full" => Some(SslMode::VerifyFull),
+                _ => None,
+            };
+        }
+
+        None
+    }
+
+    async fn connect_tls(connection_string: &str) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
+        let tls = Self::make_tls_connector();
+        let (client, connection) = tokio_postgres::connect(connection_string, tls).await?;
+        Ok((client, PgConnection::Tls(connection)))
+    }
+
+    async fn connect_no_tls(
+        connection_string: &str,
+    ) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
+        let (client, connection) = tokio_postgres::connect(connection_string, NoTls).await?;
+        Ok((client, PgConnection::NoTls(connection)))
+    }
+
+    async fn connect_with_sslmode(
+        connection_string: &str,
+    ) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
+        let sslmode = Self::sslmode_from_url(connection_string).unwrap_or(SslMode::Prefer);
+
+        match sslmode {
+            SslMode::Disable => Self::connect_no_tls(connection_string).await,
+            SslMode::Allow => {
+                match Self::connect_no_tls(connection_string).await {
+                    Ok(conn) => Ok(conn),
+                    Err(no_tls_err) => Self::connect_tls(connection_string)
+                        .await
+                        .map_err(|tls_err| {
+                            anyhow::anyhow!(
+                                "non-TLS connection failed ({}); TLS connection failed ({})",
+                                no_tls_err,
+                                tls_err
+                            )
+                        }),
+                }
+            }
+            SslMode::Prefer => {
+                match Self::connect_tls(connection_string).await {
+                    Ok(conn) => Ok(conn),
+                    Err(tls_err) => Self::connect_no_tls(connection_string)
+                        .await
+                        .map_err(|no_tls_err| {
+                            anyhow::anyhow!(
+                                "TLS connection failed ({}); non-TLS connection failed ({})",
+                                tls_err,
+                                no_tls_err
+                            )
+                        }),
+                }
+            }
+            SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
+                Self::connect_tls(connection_string).await
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl PubSub for PostgresPubSub {
     async fn publish(&self, stream: &str, payload: &[u8]) -> anyhow::Result<()> {
-        let tls = Self::make_tls_connector();
-        let (client, connection) = tokio_postgres::connect(&self.connection_string, tls).await?;
+        let (client, connection) = Self::connect_with_sslmode(&self.connection_string).await?;
 
         tokio::spawn(async move {
-            if let Err(e) = connection.await {
+            if let Err(e) = connection.run().await {
                 tracing::error!("Publish connection error: {}", e);
             }
         });
@@ -163,9 +282,7 @@ impl PostgresPubSub {
     where
         F: Fn(String, Vec<u8>) + Send + Sync + 'static,
     {
-        let tls = Self::make_tls_connector();
-        let (client, mut connection) =
-            tokio_postgres::connect(connection_string, tls).await?;
+        let (client, mut connection) = Self::connect_with_sslmode(connection_string).await?;
 
         // Subscribe to all channels
         {
