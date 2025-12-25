@@ -1,6 +1,6 @@
 [package]
 name = "orbitcast"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
@@ -15,7 +15,7 @@ categories = ["network-programming", "web-programming::websocket", "asynchronous
 
 [features]
 default = ["postgres"]
-postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
+postgres = ["dep:tokio-postgres", "dep:postgres-native-tls", "dep:native-tls"]
 memory = []
 # Future backends:
 # redis = ["dep:redis"]
@@ -63,10 +63,8 @@ async-trait = "0.1"
 
 # PostgreSQL (optional, default)
 tokio-postgres = { version = "0.7", optional = true }
-tokio-postgres-rustls = { version = "0.12", optional = true }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "ring"] }
-rustls-pemfile = { version = "2.0", optional = true }
-webpki-roots = { version = "0.26", optional = true }
+postgres-native-tls = { version = "0.5.2", optional = true }
+native-tls = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3.23"

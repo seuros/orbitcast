@@ -11,10 +11,14 @@ use tokio::sync::RwLock;
 use std::task::{Context, Poll};
 use tokio_postgres::AsyncMessage;
 use tokio_postgres::NoTls;
-use tokio_postgres_rustls::MakeRustlsConnect;
-use tokio_postgres_rustls::RustlsStream;
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
+use postgres_native_tls::TlsStream;
 
-type TlsConnection = tokio_postgres::Connection<tokio_postgres::Socket, RustlsStream<tokio_postgres::Socket>>;
+type TlsConnection = tokio_postgres::Connection<
+    tokio_postgres::Socket,
+    TlsStream<tokio_postgres::Socket>,
+>;
 type NoTlsConnection = tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>;
 
 enum PgConnection {
@@ -58,18 +62,6 @@ pub struct PostgresPubSub {
 }
 
 impl PostgresPubSub {
-    /// Create TLS connector for PostgreSQL connections
-    fn make_tls_connector() -> MakeRustlsConnect {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        MakeRustlsConnect::new(config)
-    }
-
     /// Create a new PostgreSQL pub/sub backend
     ///
     /// # Arguments
@@ -144,7 +136,8 @@ impl PostgresPubSub {
     }
 
     async fn connect_tls(connection_string: &str) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
-        let tls = Self::make_tls_connector();
+        let connector = TlsConnector::builder().build()?;
+        let tls = MakeTlsConnector::new(connector);
         let (client, connection) = tokio_postgres::connect(connection_string, tls).await?;
         Ok((client, PgConnection::Tls(connection)))
     }
