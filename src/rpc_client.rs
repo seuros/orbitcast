@@ -4,6 +4,7 @@ use anyhow::Context;
 use tonic::client::Grpc;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::codec::ProstCodec;
+use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 
@@ -14,6 +15,8 @@ pub struct AnyCableRpc {
     channel: Channel,
     timeout: Option<Duration>,
 }
+
+const PROTO_VERSIONS: &str = "v1";
 
 impl AnyCableRpc {
     pub async fn connect(addr: &str, timeout: Option<Duration>) -> anyhow::Result<Self> {
@@ -68,6 +71,9 @@ impl AnyCableRpc {
             .await
             .context("AnyCable RPC service not ready")?;
         let mut request = Request::new(message);
+        request
+            .metadata_mut()
+            .insert("protov", MetadataValue::from_static(PROTO_VERSIONS));
         if let Some(timeout) = self.timeout {
             request.set_timeout(timeout);
         }
