@@ -1,6 +1,6 @@
 [package]
 name = "orbitcast"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
@@ -30,7 +30,7 @@ path = "src/main.rs"
 tokio = { version = "1.47", features = ["full", "signal"] }
 
 # Rama - WebSocket layer
-rama = { version = "0.3.0-alpha.3", features = ["http-full", "tcp"] }
+rama = { version = "0.3.0-alpha.4", features = ["http-full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -59,10 +59,9 @@ hex = "0.4"
 base64 = "0.22"
 
 # Docking protocol
-mothership = { version = ">=0.0.31, <0.1.0", default-features = false }
+mothership = { version = ">=0.0.50, <0.1.0", default-features = false }
 
-# Pin rcgen to avoid x509-parser incompatibility
-rcgen = "=0.14.5"
+rcgen = "0.14"
 thiserror = "2.0"
 dashmap = "6.1"
 uuid = { version = "1.11", features = ["v4"] }
