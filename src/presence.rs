@@ -185,18 +185,6 @@ impl PresenceStore {
         }
     }
 
-    /// Touch a session to refresh its TTL
-    pub fn touch(&self, session_id: &str) {
-        let expires_at = Instant::now() + self.ttl;
-
-        for mut entry in self.records.iter_mut() {
-            for record in entry.value_mut().values_mut() {
-                if record.sessions.contains(&session_id.to_string()) {
-                    record.expires_at = expires_at;
-                }
-            }
-        }
-    }
 
     /// Remove expired presence records, returning leave events
     pub fn expire(&self) -> Vec<(String, PresenceEvent)> {

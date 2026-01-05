@@ -163,7 +163,6 @@ pub enum VerifyError {
 /// $pubsub channel subscribe request
 #[derive(Debug, Deserialize)]
 pub struct PubSubRequest {
-    pub channel: String,
     #[serde(default)]
     pub stream_name: Option<String>,
     #[serde(default)]
@@ -173,14 +172,12 @@ pub struct PubSubRequest {
 /// Turbo Streams subscribe request
 #[derive(Debug, Deserialize)]
 pub struct TurboRequest {
-    pub channel: String,
     pub signed_stream_name: String,
 }
 
 /// CableReady subscribe request
 #[derive(Debug, Deserialize)]
 pub struct CableReadyRequest {
-    pub channel: String,
     pub identifier: String,
 }
 
