@@ -3,16 +3,11 @@
 //! Runs as a ship under Mothership, communicating via Unix socket
 //! using the Docking Protocol.
 
-// Compile-time feature validation: exactly one pub/sub backend required
+// Compile-time feature validation: at least one pub/sub backend required.
 #[cfg(not(any(feature = "postgres", feature = "memory")))]
 compile_error!(
     "OrbitCast requires a pub/sub backend. Enable: --features postgres OR --features memory"
 );
-#[cfg(all(feature = "postgres", feature = "memory"))]
-compile_error!(
-    "Only one pub/sub backend can be enabled. Use --no-default-features --features memory."
-);
-
 mod actioncable;
 mod config;
 mod hub;
@@ -39,7 +34,7 @@ use crate::{
     config::Config,
     hub::Hub,
     presence::{PresenceStore, broadcast_presence_event},
-    protocol::{MessageType, Moored, Outgoing},
+    protocol::{CargoKind, MessageType, Moored, Outgoing},
     pubsub::PubSub,
     rpc::anycable::{CommandMessage, Env, Status},
     rpc_client::AnyCableRpc,
@@ -47,13 +42,13 @@ use crate::{
     streams::StreamsController,
 };
 
-#[cfg(feature = "postgres")]
+#[cfg(all(not(feature = "memory"), feature = "postgres"))]
 use crate::pubsub::PostgresPubSub;
 
 #[cfg(feature = "memory")]
 use crate::pubsub::MemoryPubSub;
 
-#[cfg(feature = "postgres")]
+#[cfg(all(not(feature = "memory"), feature = "postgres"))]
 type PubSubImpl = PostgresPubSub;
 #[cfg(feature = "memory")]
 type PubSubImpl = MemoryPubSub;
@@ -73,7 +68,7 @@ async fn init_pubsub(config: &Config) -> Option<Arc<PubSubImpl>> {
     {
         let _ = config;
         info!("Memory pub/sub initialized (single-node only)");
-        return Some(Arc::new(MemoryPubSub::new()));
+        Some(Arc::new(MemoryPubSub::new()))
     }
 
     #[cfg(all(not(feature = "memory"), feature = "postgres"))]
@@ -113,10 +108,8 @@ fn filter_headers(
             .collect();
     }
 
-    let allowed: std::collections::HashSet<String> = allowlist
-        .iter()
-        .map(|h| h.to_lowercase())
-        .collect();
+    let allowed: std::collections::HashSet<String> =
+        allowlist.iter().map(|h| h.to_lowercase()).collect();
 
     headers
         .iter()
@@ -196,12 +189,7 @@ fn snapshot_session(hub: &Hub, conn_id: u32) -> Option<SessionSnapshot> {
     })
 }
 
-async fn rpc_disconnect(
-    rpc: &AnyCableRpc,
-    hub: &Hub,
-    conn_id: u32,
-    config: &Config,
-) {
+async fn rpc_disconnect(rpc: &AnyCableRpc, hub: &Hub, conn_id: u32, config: &Config) {
     let snapshot = match snapshot_session(hub, conn_id) {
         Some(snapshot) => snapshot,
         None => return,
@@ -225,7 +213,11 @@ async fn rpc_disconnect(
         Ok(response) => {
             let status = status_from(response.status);
             if status != Status::Success {
-                warn!(status = ?status, error = %response.error_msg, "RPC disconnect returned non-success");
+                warn!(
+                    status = ?status,
+                    error = %response.error_msg,
+                    "RPC disconnect returned non-success"
+                );
             }
         }
         Err(e) => {
@@ -350,9 +342,7 @@ async fn main() -> anyhow::Result<()> {
     // Apply config from Mothership
     config.apply_moored_config(&moored.config);
 
-    let rpc_timeout = config
-        .rpc_request_timeout_ms
-        .map(Duration::from_millis);
+    let rpc_timeout = config.rpc_request_timeout_ms.map(Duration::from_millis);
     let rpc = Arc::new(AnyCableRpc::connect(&config.rpc_host, rpc_timeout).await?);
     info!(rpc_host = %config.rpc_host, "AnyCable RPC client ready");
 
@@ -492,11 +482,12 @@ async fn main() -> anyhow::Result<()> {
                 break; // Need more data
             }
 
-            let payload = &pending[5..total_len];
+            let payload = pending[5..total_len].to_vec();
+            pending.drain(..total_len);
 
             match msg_type {
                 MessageType::Boarding => {
-                    let boarding: protocol::Boarding = serde_json::from_slice(payload)?;
+                    let boarding: protocol::Boarding = serde_json::from_slice(&payload)?;
                     debug!(
                         conn_id = boarding.conn_id,
                         path = %boarding.path,
@@ -554,9 +545,29 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 MessageType::Cargo => {
-                    let cargo = protocol::decode_cargo(payload)?;
+                    let cargo = protocol::decode_cargo(&payload)?;
                     let conn_id = cargo.conn_id;
-                    debug!(conn_id, len = cargo.data.len(), "Received cargo");
+                    debug!(
+                        conn_id,
+                        kind = ?cargo.kind,
+                        len = cargo.data.len(),
+                        "Received cargo"
+                    );
+
+                    if cargo.kind != CargoKind::Text {
+                        debug!(
+                            conn_id,
+                            kind = ?cargo.kind,
+                            len = cargo.data.len(),
+                            "Ignoring non-text ActionCable cargo"
+                        );
+                        continue;
+                    }
+
+                    if cargo.data.iter().all(|byte| byte.is_ascii_whitespace()) {
+                        debug!(conn_id, "Ignoring empty ActionCable text frame");
+                        continue;
+                    }
 
                     let parsed = match actioncable::parse_command(&cargo.data) {
                         Ok(command) => command,
@@ -589,16 +600,25 @@ async fn main() -> anyhow::Result<()> {
                                         // Subscribe to the stream
                                         if let Some(mut session) = hub.get_session_mut(conn_id) {
                                             session.subscribe(identifier.clone());
-                                            session.add_subscription_streams(&identifier, std::slice::from_ref(&result.stream));
+                                            session.add_subscription_streams(
+                                                &identifier,
+                                                std::slice::from_ref(&result.stream),
+                                            );
 
                                             // Track presence stream if enabled
                                             if result.presence {
-                                                session.set_presence_stream(&identifier, result.stream.clone());
+                                                session.set_presence_stream(
+                                                    &identifier,
+                                                    result.stream.clone(),
+                                                );
                                             }
 
                                             // Track whisper stream if enabled
                                             if result.whisper {
-                                                session.set_whisper_stream(&identifier, result.stream.clone());
+                                                session.set_whisper_stream(
+                                                    &identifier,
+                                                    result.stream.clone(),
+                                                );
                                             }
                                         }
 
@@ -617,7 +637,11 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                     Err(e) => {
-                                        debug!(conn_id, error = %e, "Signed stream verification failed");
+                                        debug!(
+                                            conn_id,
+                                            error = %e,
+                                            "Signed stream verification failed"
+                                        );
                                         let reject = ServerMessage::RejectSubscription {
                                             identifier: identifier.clone(),
                                         };
@@ -646,13 +670,8 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 };
 
-                            let env = build_env(
-                                &path,
-                                &headers,
-                                &config.rpc_headers,
-                                cstate,
-                                istate,
-                            );
+                            let env =
+                                build_env(&path, &headers, &config.rpc_headers, cstate, istate);
 
                             let message = CommandMessage {
                                 command: command.to_string(),
@@ -693,48 +712,63 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if status == Status::Success {
-                                let (added_streams, removed_streams, presence_stream) = if let Some(mut session) =
-                                    hub.get_session_mut(conn_id)
-                                {
-                                    session.subscribe(identifier.clone());
+                                let (added_streams, removed_streams, presence_stream) =
+                                    if let Some(mut session) = hub.get_session_mut(conn_id) {
+                                        session.subscribe(identifier.clone());
 
-                                    let mut pstream = None;
-                                    if let Some(env) = response.env {
-                                        session.set_cstate(env.cstate.clone());
-                                        if !env.istate.is_empty() {
-                                            session.set_istate(&identifier, env.istate.clone());
-                                            // Check for presence stream in istate
-                                            if let Some(ps) = env.istate.get(crate::session::PRESENCE_STREAM_STATE) {
-                                                session.set_presence_stream(&identifier, ps.clone());
-                                                pstream = Some(ps.clone());
-                                            }
-                                            // Check for whisper stream in istate
-                                            if let Some(ws) = env.istate.get(crate::session::WHISPER_STREAM_STATE) {
-                                                session.set_whisper_stream(&identifier, ws.clone());
+                                        let mut pstream = None;
+                                        if let Some(env) = response.env {
+                                            session.set_cstate(env.cstate.clone());
+                                            if !env.istate.is_empty() {
+                                                session.set_istate(&identifier, env.istate.clone());
+                                                // Check for presence stream in istate
+                                                if let Some(ps) = env
+                                                    .istate
+                                                    .get(crate::session::PRESENCE_STREAM_STATE)
+                                                {
+                                                    session.set_presence_stream(
+                                                        &identifier,
+                                                        ps.clone(),
+                                                    );
+                                                    pstream = Some(ps.clone());
+                                                }
+                                                // Check for whisper stream in istate
+                                                if let Some(ws) = env
+                                                    .istate
+                                                    .get(crate::session::WHISPER_STREAM_STATE)
+                                                {
+                                                    session.set_whisper_stream(
+                                                        &identifier,
+                                                        ws.clone(),
+                                                    );
+                                                }
                                             }
                                         }
-                                    }
 
-                                    let mut removed = Vec::new();
-                                    if response.stop_streams {
-                                        removed = session.remove_all_subscription_streams(&identifier);
-                                    } else if !response.stopped_streams.is_empty() {
-                                        removed = session.remove_subscription_streams(
-                                            &identifier,
-                                            &response.stopped_streams,
-                                        );
-                                    }
+                                        let mut removed = Vec::new();
+                                        if response.stop_streams {
+                                            removed = session
+                                                .remove_all_subscription_streams(&identifier);
+                                        } else if !response.stopped_streams.is_empty() {
+                                            removed = session.remove_subscription_streams(
+                                                &identifier,
+                                                &response.stopped_streams,
+                                            );
+                                        }
 
-                                    let added = if response.streams.is_empty() {
-                                        Vec::new()
+                                        let added = if response.streams.is_empty() {
+                                            Vec::new()
+                                        } else {
+                                            session.add_subscription_streams(
+                                                &identifier,
+                                                &response.streams,
+                                            )
+                                        };
+
+                                        (added, removed, pstream)
                                     } else {
-                                        session.add_subscription_streams(&identifier, &response.streams)
+                                        (Vec::new(), Vec::new(), None)
                                     };
-
-                                    (added, removed, pstream)
-                                } else {
-                                    (Vec::new(), Vec::new(), None)
-                                };
 
                                 for stream in added_streams {
                                     hub.subscribe_to_stream(conn_id, &stream);
@@ -773,10 +807,13 @@ async fn main() -> anyhow::Result<()> {
                                     let info: serde_json::Value = if p.info.is_empty() {
                                         serde_json::Value::Null
                                     } else {
-                                        serde_json::from_str(&p.info).unwrap_or(serde_json::Value::Null)
+                                        serde_json::from_str(&p.info)
+                                            .unwrap_or(serde_json::Value::Null)
                                     };
 
-                                    if let Some(event) = presence.join(pstream, &session_id, &presence_id, info) {
+                                    if let Some(event) =
+                                        presence.join(pstream, &session_id, &presence_id, info)
+                                    {
                                         broadcast_presence_event(&hub, pstream, &event).await;
                                     }
 
@@ -804,13 +841,8 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 };
 
-                            let env = build_env(
-                                &path,
-                                &headers,
-                                &config.rpc_headers,
-                                cstate,
-                                istate,
-                            );
+                            let env =
+                                build_env(&path, &headers, &config.rpc_headers, cstate, istate);
 
                             let message = CommandMessage {
                                 command: command.to_string(),
@@ -851,45 +883,47 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if status == Status::Success {
-                                let (added_streams, removed_streams, presence_stream) = if let Some(mut session) =
-                                    hub.get_session_mut(conn_id)
-                                {
-                                    session.unsubscribe(&identifier);
+                                let (added_streams, removed_streams, presence_stream) =
+                                    if let Some(mut session) = hub.get_session_mut(conn_id) {
+                                        session.unsubscribe(&identifier);
 
-                                    // Get presence stream before removing
-                                    let pstream = session.remove_presence_stream(&identifier);
+                                        // Get presence stream before removing
+                                        let pstream = session.remove_presence_stream(&identifier);
 
-                                    // Remove whisper stream
-                                    session.remove_whisper_stream(&identifier);
+                                        // Remove whisper stream
+                                        session.remove_whisper_stream(&identifier);
 
-                                    if let Some(env) = response.env {
-                                        session.set_cstate(env.cstate);
-                                        if !env.istate.is_empty() {
-                                            session.set_istate(&identifier, env.istate);
+                                        if let Some(env) = response.env {
+                                            session.set_cstate(env.cstate);
+                                            if !env.istate.is_empty() {
+                                                session.set_istate(&identifier, env.istate);
+                                            }
                                         }
-                                    }
 
-                                    let removed = if response.stop_streams {
-                                        session.remove_all_subscription_streams(&identifier)
-                                    } else if !response.stopped_streams.is_empty() {
-                                        session.remove_subscription_streams(
-                                            &identifier,
-                                            &response.stopped_streams,
-                                        )
+                                        let removed = if response.stop_streams {
+                                            session.remove_all_subscription_streams(&identifier)
+                                        } else if !response.stopped_streams.is_empty() {
+                                            session.remove_subscription_streams(
+                                                &identifier,
+                                                &response.stopped_streams,
+                                            )
+                                        } else {
+                                            session.remove_all_subscription_streams(&identifier)
+                                        };
+
+                                        let added = if response.streams.is_empty() {
+                                            Vec::new()
+                                        } else {
+                                            session.add_subscription_streams(
+                                                &identifier,
+                                                &response.streams,
+                                            )
+                                        };
+
+                                        (added, removed, pstream)
                                     } else {
-                                        session.remove_all_subscription_streams(&identifier)
+                                        (Vec::new(), Vec::new(), None)
                                     };
-
-                                    let added = if response.streams.is_empty() {
-                                        Vec::new()
-                                    } else {
-                                        session.add_subscription_streams(&identifier, &response.streams)
-                                    };
-
-                                    (added, removed, pstream)
-                                } else {
-                                    (Vec::new(), Vec::new(), None)
-                                };
 
                                 for stream in added_streams {
                                     hub.subscribe_to_stream(conn_id, &stream);
@@ -947,13 +981,8 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 };
 
-                            let env = build_env(
-                                &path,
-                                &headers,
-                                &config.rpc_headers,
-                                cstate,
-                                istate,
-                            );
+                            let env =
+                                build_env(&path, &headers, &config.rpc_headers, cstate, istate);
 
                             let message = CommandMessage {
                                 command: command.to_string(),
@@ -1009,9 +1038,9 @@ async fn main() -> anyhow::Result<()> {
                         } => {
                             // Get presence stream from session
                             let presence_stream = match hub.get_session(conn_id) {
-                                Some(session) => {
-                                    session.get_presence_stream(&identifier).map(|s| s.to_string())
-                                }
+                                Some(session) => session
+                                    .get_presence_stream(&identifier)
+                                    .map(|s| s.to_string()),
                                 None => {
                                     warn!(conn_id, "Received join for unknown session");
                                     continue;
@@ -1025,9 +1054,7 @@ async fn main() -> anyhow::Result<()> {
 
                             // Get presence data from command or fall back to connection identifiers
                             let (presence_id, info) = match presence_data {
-                                Some(p) => {
-                                    (p.id, p.info.unwrap_or(serde_json::Value::Null))
-                                }
+                                Some(p) => (p.id, p.info.unwrap_or(serde_json::Value::Null)),
                                 None => {
                                     let id = hub
                                         .get_session(conn_id)
@@ -1047,9 +1074,9 @@ async fn main() -> anyhow::Result<()> {
                         ClientCommand::Leave { identifier } => {
                             // Get presence stream from session
                             let presence_stream = match hub.get_session(conn_id) {
-                                Some(session) => {
-                                    session.get_presence_stream(&identifier).map(|s| s.to_string())
-                                }
+                                Some(session) => session
+                                    .get_presence_stream(&identifier)
+                                    .map(|s| s.to_string()),
                                 None => {
                                     warn!(conn_id, "Received leave for unknown session");
                                     continue;
@@ -1069,9 +1096,9 @@ async fn main() -> anyhow::Result<()> {
                         ClientCommand::Presence { identifier } => {
                             // Get presence stream from session
                             let presence_stream = match hub.get_session(conn_id) {
-                                Some(session) => {
-                                    session.get_presence_stream(&identifier).map(|s| s.to_string())
-                                }
+                                Some(session) => session
+                                    .get_presence_stream(&identifier)
+                                    .map(|s| s.to_string()),
                                 None => {
                                     warn!(conn_id, "Received presence query for unknown session");
                                     continue;
@@ -1096,9 +1123,9 @@ async fn main() -> anyhow::Result<()> {
                         ClientCommand::Whisper { identifier, data } => {
                             // Get whisper stream from session
                             let whisper_stream = match hub.get_session(conn_id) {
-                                Some(session) => {
-                                    session.get_whisper_stream(&identifier).map(|s| s.to_string())
-                                }
+                                Some(session) => session
+                                    .get_whisper_stream(&identifier)
+                                    .map(|s| s.to_string()),
                                 None => {
                                     warn!(conn_id, "Received whisper for unknown session");
                                     continue;
@@ -1135,7 +1162,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 MessageType::Disembark => {
-                    let disembark: protocol::Disembark = serde_json::from_slice(payload)?;
+                    let disembark: protocol::Disembark = serde_json::from_slice(&payload)?;
                     debug!(
                         conn_id = disembark.conn_id,
                         code = disembark.code,
@@ -1158,8 +1185,6 @@ async fn main() -> anyhow::Result<()> {
                     warn!(msg_type = ?msg_type, "Unhandled message type");
                 }
             }
-
-            pending.drain(..total_len);
         }
     }
 

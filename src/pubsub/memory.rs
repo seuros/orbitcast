@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 /// Default buffer size for broadcast channels
 const DEFAULT_BUFFER_SIZE: usize = 1024;

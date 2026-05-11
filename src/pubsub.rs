@@ -5,15 +5,17 @@
 //!
 //! # Features
 //!
-//! Exactly one backend must be enabled at compile time:
+//! At least one backend must be enabled at compile time. When multiple
+//! backends are enabled, `memory` is used for deterministic `--all-features`
+//! builds.
 //!
 //! - `postgres` - PostgreSQL LISTEN/NOTIFY for multi-node deployments
 //! - `memory` - In-memory broadcast for single-node/development
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(feature = "memory")))]
 mod postgres;
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(feature = "memory")))]
 pub use postgres::PostgresPubSub;
 
 #[cfg(feature = "memory")]

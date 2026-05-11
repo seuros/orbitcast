@@ -164,7 +164,7 @@ impl PresenceStore {
                     info_type: PRESENCE_INFO.to_string(),
                     total: 0,
                     records: Some(vec![]),
-                }
+                };
             }
         };
 
@@ -184,7 +184,6 @@ impl PresenceStore {
             records: Some(records),
         }
     }
-
 
     /// Remove expired presence records, returning leave events
     pub fn expire(&self) -> Vec<(String, PresenceEvent)> {

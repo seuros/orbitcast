@@ -68,6 +68,10 @@ ignore_comments = true
 ignore_blank_lines = true
 visibility_order = ["pub", "private"]
 
+[decree.rust.ignore.file-too-long]
+filenames = ["main.rs"]
+extensions = []
+
 # External linter integration
 [decree.rust.linter]
 command = "clippy"

@@ -78,7 +78,7 @@ impl Hub {
             loop {
                 match rx.recv().await {
                     Ok(payload) => {
-                        let cargo = Cargo { conn_id, data: payload };
+                        let cargo = Cargo::text(conn_id, payload);
                         if outgoing_tx.send(Outgoing::Cargo(cargo)).await.is_err() {
                             break;
                         }
@@ -174,7 +174,7 @@ impl Hub {
             loop {
                 match rx.recv().await {
                     Ok(payload) => {
-                        let cargo = Cargo { conn_id, data: payload };
+                        let cargo = Cargo::text(conn_id, payload);
                         if outgoing_tx.send(Outgoing::Cargo(cargo)).await.is_err() {
                             break;
                         }
@@ -254,17 +254,12 @@ impl Hub {
         let receivers: Vec<u32> = self
             .subscriptions
             .iter()
-            .filter(|entry| {
-                *entry.key() != exclude_conn_id && entry.value().contains_key(stream)
-            })
+            .filter(|entry| *entry.key() != exclude_conn_id && entry.value().contains_key(stream))
             .map(|entry| *entry.key())
             .collect();
 
         for conn_id in &receivers {
-            let cargo = Cargo {
-                conn_id: *conn_id,
-                data: payload.to_vec(),
-            };
+            let cargo = Cargo::text(*conn_id, payload.to_vec());
             let _ = self.outgoing_tx.send(Outgoing::Cargo(cargo)).await;
         }
 
@@ -290,10 +285,7 @@ impl Hub {
 
     /// Send message to a specific connection
     pub async fn send(&self, conn_id: u32, payload: &[u8]) {
-        let cargo = Cargo {
-            conn_id,
-            data: payload.to_vec(),
-        };
+        let cargo = Cargo::text(conn_id, payload.to_vec());
 
         if let Err(e) = self.outgoing_tx.send(Outgoing::Cargo(cargo)).await {
             warn!(conn_id, error = %e, "failed to send cargo");
