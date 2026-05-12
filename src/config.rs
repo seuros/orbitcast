@@ -130,7 +130,8 @@ impl Config {
 
         // CableReady
         if let Some(cable_ready) = config.get("cable_ready_streams") {
-            self.streams.cable_ready = cable_ready.eq_ignore_ascii_case("true") || cable_ready == "1";
+            self.streams.cable_ready =
+                cable_ready.eq_ignore_ascii_case("true") || cable_ready == "1";
         }
 
         if let Some(secret) = config.get("cable_ready_secret")

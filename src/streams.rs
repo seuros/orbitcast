@@ -163,7 +163,6 @@ pub enum VerifyError {
 /// $pubsub channel subscribe request
 #[derive(Debug, Deserialize)]
 pub struct PubSubRequest {
-    pub channel: String,
     #[serde(default)]
     pub stream_name: Option<String>,
     #[serde(default)]
@@ -173,14 +172,12 @@ pub struct PubSubRequest {
 /// Turbo Streams subscribe request
 #[derive(Debug, Deserialize)]
 pub struct TurboRequest {
-    pub channel: String,
     pub signed_stream_name: String,
 }
 
 /// CableReady subscribe request
 #[derive(Debug, Deserialize)]
 pub struct CableReadyRequest {
-    pub channel: String,
     pub identifier: String,
 }
 
@@ -343,13 +340,13 @@ pub enum StreamError {
 
 /// Standard base64 encode
 fn base64_encode(data: &[u8]) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     STANDARD.encode(data)
 }
 
 /// Standard base64 decode
 fn base64_decode(data: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     STANDARD.decode(data)
 }
 

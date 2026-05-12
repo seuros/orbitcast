@@ -5,21 +5,20 @@
 
 use crate::pubsub::PubSub;
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use std::task::{Context, Poll};
-use tokio_postgres::AsyncMessage;
-use tokio_postgres::NoTls;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 use postgres_native_tls::TlsStream;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::RwLock;
+use tokio_postgres::AsyncMessage;
+use tokio_postgres::NoTls;
 
-type TlsConnection = tokio_postgres::Connection<
-    tokio_postgres::Socket,
-    TlsStream<tokio_postgres::Socket>,
->;
-type NoTlsConnection = tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>;
+type TlsConnection =
+    tokio_postgres::Connection<tokio_postgres::Socket, TlsStream<tokio_postgres::Socket>>;
+type NoTlsConnection =
+    tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>;
 
 enum PgConnection {
     Tls(TlsConnection),
@@ -135,7 +134,9 @@ impl PostgresPubSub {
         None
     }
 
-    async fn connect_tls(connection_string: &str) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
+    async fn connect_tls(
+        connection_string: &str,
+    ) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
         let connector = TlsConnector::builder().build()?;
         let tls = MakeTlsConnector::new(connector);
         let (client, connection) = tokio_postgres::connect(connection_string, tls).await?;
@@ -156,24 +157,22 @@ impl PostgresPubSub {
 
         match sslmode {
             SslMode::Disable => Self::connect_no_tls(connection_string).await,
-            SslMode::Allow => {
-                match Self::connect_no_tls(connection_string).await {
-                    Ok(conn) => Ok(conn),
-                    Err(no_tls_err) => Self::connect_tls(connection_string)
-                        .await
-                        .map_err(|tls_err| {
-                            anyhow::anyhow!(
-                                "non-TLS connection failed ({}); TLS connection failed ({})",
-                                no_tls_err,
-                                tls_err
-                            )
-                        }),
-                }
-            }
-            SslMode::Prefer => {
-                match Self::connect_tls(connection_string).await {
-                    Ok(conn) => Ok(conn),
-                    Err(tls_err) => Self::connect_no_tls(connection_string)
+            SslMode::Allow => match Self::connect_no_tls(connection_string).await {
+                Ok(conn) => Ok(conn),
+                Err(no_tls_err) => Self::connect_tls(connection_string)
+                    .await
+                    .map_err(|tls_err| {
+                        anyhow::anyhow!(
+                            "non-TLS connection failed ({}); TLS connection failed ({})",
+                            no_tls_err,
+                            tls_err
+                        )
+                    }),
+            },
+            SslMode::Prefer => match Self::connect_tls(connection_string).await {
+                Ok(conn) => Ok(conn),
+                Err(tls_err) => {
+                    Self::connect_no_tls(connection_string)
                         .await
                         .map_err(|no_tls_err| {
                             anyhow::anyhow!(
@@ -181,9 +180,9 @@ impl PostgresPubSub {
                                 tls_err,
                                 no_tls_err
                             )
-                        }),
+                        })
                 }
-            }
+            },
             SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
                 Self::connect_tls(connection_string).await
             }
@@ -281,9 +280,7 @@ impl PostgresPubSub {
         {
             let subs = subscriptions.read().await;
             for channel in subs.keys() {
-                client
-                    .batch_execute(&format!("LISTEN {}", channel))
-                    .await?;
+                client.batch_execute(&format!("LISTEN {}", channel)).await?;
                 tracing::info!("Subscribed to channel: {}", channel);
             }
         }
@@ -316,7 +313,9 @@ impl PostgresPubSub {
                     tracing::info!("Subscribed to channel: {}", channel);
                 }
                 for channel in to_remove {
-                    client.batch_execute(&format!("UNLISTEN {}", channel)).await?;
+                    client
+                        .batch_execute(&format!("UNLISTEN {}", channel))
+                        .await?;
                     current_subs.remove(&channel);
                     tracing::info!("Unsubscribed from channel: {}", channel);
                 }
@@ -336,7 +335,10 @@ impl PostgresPubSub {
                             if let Some(stream) = stream {
                                 callback(stream, payload);
                             } else {
-                                tracing::warn!("Received notification for unknown channel: {}", channel);
+                                tracing::warn!(
+                                    "Received notification for unknown channel: {}",
+                                    channel
+                                );
                             }
                         }
                         Some(Ok(_)) => {

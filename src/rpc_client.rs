@@ -1,15 +1,17 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use tonic::Request;
 use tonic::client::Grpc;
 use tonic::codegen::http::uri::PathAndQuery;
-use tonic::codec::ProstCodec;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
-use tonic::Request;
+use tonic_prost::ProstCodec;
 
-use crate::rpc::anycable::{CommandMessage, CommandResponse, ConnectionRequest, ConnectionResponse,
-    DisconnectRequest, DisconnectResponse};
+use crate::rpc::anycable::{
+    CommandMessage, CommandResponse, ConnectionRequest, ConnectionResponse, DisconnectRequest,
+    DisconnectResponse,
+};
 
 pub struct AnyCableRpc {
     channel: Channel,
@@ -34,30 +36,18 @@ impl AnyCableRpc {
         &self,
         request: ConnectionRequest,
     ) -> anyhow::Result<ConnectionResponse> {
-        self.unary(
-            request,
-            "/anycable.RPC/Connect",
-        )
-        .await
+        self.unary(request, "/anycable.RPC/Connect").await
     }
 
     pub async fn command(&self, message: CommandMessage) -> anyhow::Result<CommandResponse> {
-        self.unary(
-            message,
-            "/anycable.RPC/Command",
-        )
-        .await
+        self.unary(message, "/anycable.RPC/Command").await
     }
 
     pub async fn disconnect(
         &self,
         request: DisconnectRequest,
     ) -> anyhow::Result<DisconnectResponse> {
-        self.unary(
-            request,
-            "/anycable.RPC/Disconnect",
-        )
-        .await
+        self.unary(request, "/anycable.RPC/Disconnect").await
     }
 
     async fn unary<Req, Res>(&self, message: Req, path: &'static str) -> anyhow::Result<Res>
@@ -66,8 +56,7 @@ impl AnyCableRpc {
         Res: prost::Message + Default + 'static,
     {
         let mut grpc = Grpc::new(self.channel.clone());
-        grpc
-            .ready()
+        grpc.ready()
             .await
             .context("AnyCable RPC service not ready")?;
         let mut request = Request::new(message);
@@ -78,7 +67,11 @@ impl AnyCableRpc {
             request.set_timeout(timeout);
         }
         let response = grpc
-            .unary(request, PathAndQuery::from_static(path), ProstCodec::default())
+            .unary(
+                request,
+                PathAndQuery::from_static(path),
+                ProstCodec::default(),
+            )
             .await?
             .into_inner();
         Ok(response)

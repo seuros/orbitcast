@@ -283,7 +283,11 @@ mod tests {
 
     #[test]
     fn test_parse_join_with_presence() {
-        let json = br#"{"command":"join","identifier":"chat_1","presence":{"id":"user_42","info":{"name":"Marissa"}}}"#;
+        let json = br#"{
+            "command":"join",
+            "identifier":"chat_1",
+            "presence":{"id":"user_42","info":{"name":"Marissa"}}
+        }"#;
         let cmd = parse_command(json).unwrap();
         match cmd {
             ClientCommand::Join {

@@ -164,7 +164,7 @@ impl PresenceStore {
                     info_type: PRESENCE_INFO.to_string(),
                     total: 0,
                     records: Some(vec![]),
-                }
+                };
             }
         };
 
@@ -182,19 +182,6 @@ impl PresenceStore {
             info_type: PRESENCE_INFO.to_string(),
             total: records.len(),
             records: Some(records),
-        }
-    }
-
-    /// Touch a session to refresh its TTL
-    pub fn touch(&self, session_id: &str) {
-        let expires_at = Instant::now() + self.ttl;
-
-        for mut entry in self.records.iter_mut() {
-            for record in entry.value_mut().values_mut() {
-                if record.sessions.contains(&session_id.to_string()) {
-                    record.expires_at = expires_at;
-                }
-            }
         }
     }
 

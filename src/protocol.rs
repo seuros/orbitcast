@@ -1,9 +1,9 @@
-//! Protocol re-exports from mothership docking protocol
+//! Protocol re-exports from the Mothership docking protocol crate.
 //!
 //! OrbitCast uses the standard Mothership docking protocol.
 
-pub use mothership::docking::{
-    Boarding, Cargo, Disembark, Dock, MessageType, Moored, VERSION, decode_cargo,
+pub use mothership_docking_protocol::{
+    Boarding, Cargo, CargoKind, Disembark, Dock, MessageType, Moored, VERSION, decode_cargo,
     decode_header, encode_cargo, encode_disembark, encode_dock,
 };
 
@@ -28,6 +28,7 @@ mod tests {
     fn test_cargo_roundtrip() {
         let cargo = Cargo {
             conn_id: 42,
+            kind: CargoKind::Text,
             data: b"test payload".to_vec(),
         };
         let encoded = encode_cargo(&cargo);
@@ -35,6 +36,7 @@ mod tests {
         assert_eq!(msg_type, MessageType::Cargo);
         let decoded = decode_cargo(&encoded[5..5 + len]).unwrap();
         assert_eq!(decoded.conn_id, 42);
+        assert_eq!(decoded.kind, CargoKind::Text);
         assert_eq!(decoded.data, b"test payload");
     }
 }
