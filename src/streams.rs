@@ -10,7 +10,7 @@
 //! 2. Calculate HMAC-SHA256 digest
 //! 3. Format: `${encoded}--${digest_hex}`
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;

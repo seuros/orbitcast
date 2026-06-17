@@ -3,7 +3,7 @@ name = "orbitcast"
 version = "0.2.0"
 exclude = ["Cargo.lock"]
 edition = "2024"
-rust-version = "1.92.0"
+rust-version = "1.95"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
 description = "Real-time WebSocket server with ActionCable protocol for Mothership"
 readme = "README.md"
@@ -54,8 +54,8 @@ prost = "0.14"
 tonic-prost = "0.14"
 
 # Crypto for signed streams
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 subtle = "2.6"
 hex = "0.4"
 base64 = "0.22"
