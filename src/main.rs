@@ -239,6 +239,117 @@ async fn close_connection(
     hub.remove_session(conn_id);
 }
 
+/// Run an AnyCable `command` RPC (subscribe/unsubscribe/message) for a session.
+///
+/// Builds the env from the current session, dispatches the RPC, flushes any
+/// transmissions, and applies disconnect/error handling. Returns the response
+/// and decoded status when the caller should continue processing; returns
+/// `None` (after logging / closing as appropriate) when the caller should skip
+/// this command.
+async fn exchange_command(
+    rpc: &AnyCableRpc,
+    hub: &Hub,
+    config: &Config,
+    conn_id: u32,
+    command: &str,
+    identifier: &str,
+    data: String,
+) -> Option<(crate::rpc::anycable::CommandResponse, Status)> {
+    let (path, headers, cstate, istate, connection_identifiers) = match hub.get_session(conn_id) {
+        Some(session) => (
+            session.path.clone(),
+            session.headers.clone(),
+            session.cstate.clone(),
+            session.istate_for(identifier),
+            session.connection_identifiers.clone().unwrap_or_default(),
+        ),
+        None => {
+            warn!(conn_id, "Received command for unknown session");
+            return None;
+        }
+    };
+
+    let env = build_env(&path, &headers, &config.rpc_headers, cstate, istate);
+
+    let message = CommandMessage {
+        command: command.to_string(),
+        identifier: identifier.to_string(),
+        connection_identifiers,
+        data,
+        env: Some(env),
+    };
+
+    let mut response = match rpc.command(message).await {
+        Ok(response) => response,
+        Err(e) => {
+            error!(conn_id, error = %e, "RPC command failed");
+            close_connection(rpc, hub, conn_id, 1011, "rpc_command_failed", config).await;
+            return None;
+        }
+    };
+
+    let status = status_from(response.status);
+    send_transmissions(hub, conn_id, std::mem::take(&mut response.transmissions)).await;
+
+    if response.disconnect || status == Status::Error {
+        let reason = if response.error_msg.is_empty() {
+            "rpc_disconnect"
+        } else {
+            response.error_msg.as_str()
+        };
+        close_connection(rpc, hub, conn_id, 1000, reason, config).await;
+        return None;
+    }
+
+    Some((response, status))
+}
+
+/// Apply stream membership changes from an RPC response, keeping the local hub
+/// subscriptions and the pub/sub backend in sync.
+async fn apply_stream_changes(
+    hub: &Hub,
+    pubsub: &Option<Arc<PubSubImpl>>,
+    conn_id: u32,
+    added_streams: Vec<String>,
+    removed_streams: Vec<String>,
+) {
+    for stream in added_streams {
+        hub.subscribe_to_stream(conn_id, &stream);
+        if let Some(ps) = pubsub
+            && hub.stream_subscriber_count(&stream) == 1
+            && let Err(e) = ps.subscribe(&stream).await
+        {
+            warn!(stream = %stream, error = %e, "Failed to subscribe pubsub");
+        }
+    }
+
+    for stream in removed_streams {
+        hub.unsubscribe_from_stream(conn_id, &stream);
+        if hub.stream_subscriber_count(&stream) == 0
+            && let Some(ps) = pubsub
+            && let Err(e) = ps.unsubscribe(&stream).await
+        {
+            warn!(stream = %stream, error = %e, "Failed to unsubscribe pubsub");
+        }
+    }
+}
+
+/// Resolve the presence stream tracked for `identifier` on a session.
+///
+/// Returns `None` (after logging) when the session is unknown or has no
+/// presence stream for the subscription, so the caller can skip the command.
+fn resolve_presence_stream(hub: &Hub, conn_id: u32, identifier: &str) -> Option<String> {
+    let Some(session) = hub.get_session(conn_id) else {
+        warn!(conn_id, "Received presence command for unknown session");
+        return None;
+    };
+    let Some(pstream) = session.get_presence_stream(identifier) else {
+        warn!(conn_id, identifier, "No presence stream for subscription");
+        return None;
+    };
+    Some(pstream.to_string())
+}
+
 /// Perform docking handshake with Mothership
 async fn dock<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     stream: &mut S,
@@ -652,64 +763,19 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             // Standard RPC subscription
-                            let command = "subscribe";
-                            let data = String::new();
-
-                            let (path, headers, cstate, istate, connection_identifiers) =
-                                match hub.get_session(conn_id) {
-                                    Some(session) => (
-                                        session.path.clone(),
-                                        session.headers.clone(),
-                                        session.cstate.clone(),
-                                        session.istate_for(&identifier),
-                                        session.connection_identifiers.clone().unwrap_or_default(),
-                                    ),
-                                    None => {
-                                        warn!(conn_id, "Received command for unknown session");
-                                        continue;
-                                    }
-                                };
-
-                            let env =
-                                build_env(&path, &headers, &config.rpc_headers, cstate, istate);
-
-                            let message = CommandMessage {
-                                command: command.to_string(),
-                                identifier: identifier.clone(),
-                                connection_identifiers,
-                                data,
-                                env: Some(env),
-                            };
-
-                            let response = match rpc.command(message).await {
-                                Ok(response) => response,
-                                Err(e) => {
-                                    error!(conn_id, error = %e, "RPC command failed");
-                                    close_connection(
-                                        &rpc,
-                                        &hub,
-                                        conn_id,
-                                        1011,
-                                        "rpc_command_failed",
-                                        &config,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            };
-
-                            let status = status_from(response.status);
-                            send_transmissions(&hub, conn_id, response.transmissions).await;
-
-                            if response.disconnect || status == Status::Error {
-                                let reason = if response.error_msg.is_empty() {
-                                    "rpc_disconnect"
-                                } else {
-                                    response.error_msg.as_str()
-                                };
-                                close_connection(&rpc, &hub, conn_id, 1000, reason, &config).await;
+                            let Some((response, status)) = exchange_command(
+                                &rpc,
+                                &hub,
+                                &config,
+                                conn_id,
+                                "subscribe",
+                                &identifier,
+                                String::new(),
+                            )
+                            .await
+                            else {
                                 continue;
-                            }
+                            };
 
                             if status == Status::Success {
                                 let (added_streams, removed_streams, presence_stream) =
@@ -770,33 +836,14 @@ async fn main() -> anyhow::Result<()> {
                                         (Vec::new(), Vec::new(), None)
                                     };
 
-                                for stream in added_streams {
-                                    hub.subscribe_to_stream(conn_id, &stream);
-                                    if let Some(ref ps) = pubsub
-                                        && hub.stream_subscriber_count(&stream) == 1
-                                        && let Err(e) = ps.subscribe(&stream).await
-                                    {
-                                        warn!(
-                                            stream = %stream,
-                                            error = %e,
-                                            "Failed to subscribe pubsub"
-                                        );
-                                    }
-                                }
-
-                                for stream in removed_streams {
-                                    hub.unsubscribe_from_stream(conn_id, &stream);
-                                    if hub.stream_subscriber_count(&stream) == 0
-                                        && let Some(ref ps) = pubsub
-                                        && let Err(e) = ps.unsubscribe(&stream).await
-                                    {
-                                        warn!(
-                                            stream = %stream,
-                                            error = %e,
-                                            "Failed to unsubscribe pubsub"
-                                        );
-                                    }
-                                }
+                                apply_stream_changes(
+                                    &hub,
+                                    &pubsub,
+                                    conn_id,
+                                    added_streams,
+                                    removed_streams,
+                                )
+                                .await;
 
                                 // Handle presence join from RPC response
                                 if let Some(ref p) = response.presence
@@ -823,64 +870,19 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         ClientCommand::Unsubscribe { identifier } => {
-                            let command = "unsubscribe";
-                            let data = String::new();
-
-                            let (path, headers, cstate, istate, connection_identifiers) =
-                                match hub.get_session(conn_id) {
-                                    Some(session) => (
-                                        session.path.clone(),
-                                        session.headers.clone(),
-                                        session.cstate.clone(),
-                                        session.istate_for(&identifier),
-                                        session.connection_identifiers.clone().unwrap_or_default(),
-                                    ),
-                                    None => {
-                                        warn!(conn_id, "Received command for unknown session");
-                                        continue;
-                                    }
-                                };
-
-                            let env =
-                                build_env(&path, &headers, &config.rpc_headers, cstate, istate);
-
-                            let message = CommandMessage {
-                                command: command.to_string(),
-                                identifier: identifier.clone(),
-                                connection_identifiers,
-                                data,
-                                env: Some(env),
-                            };
-
-                            let response = match rpc.command(message).await {
-                                Ok(response) => response,
-                                Err(e) => {
-                                    error!(conn_id, error = %e, "RPC command failed");
-                                    close_connection(
-                                        &rpc,
-                                        &hub,
-                                        conn_id,
-                                        1011,
-                                        "rpc_command_failed",
-                                        &config,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            };
-
-                            let status = status_from(response.status);
-                            send_transmissions(&hub, conn_id, response.transmissions).await;
-
-                            if response.disconnect || status == Status::Error {
-                                let reason = if response.error_msg.is_empty() {
-                                    "rpc_disconnect"
-                                } else {
-                                    response.error_msg.as_str()
-                                };
-                                close_connection(&rpc, &hub, conn_id, 1000, reason, &config).await;
+                            let Some((response, status)) = exchange_command(
+                                &rpc,
+                                &hub,
+                                &config,
+                                conn_id,
+                                "unsubscribe",
+                                &identifier,
+                                String::new(),
+                            )
+                            .await
+                            else {
                                 continue;
-                            }
+                            };
 
                             if status == Status::Success {
                                 let (added_streams, removed_streams, presence_stream) =
@@ -925,33 +927,14 @@ async fn main() -> anyhow::Result<()> {
                                         (Vec::new(), Vec::new(), None)
                                     };
 
-                                for stream in added_streams {
-                                    hub.subscribe_to_stream(conn_id, &stream);
-                                    if let Some(ref ps) = pubsub
-                                        && hub.stream_subscriber_count(&stream) == 1
-                                        && let Err(e) = ps.subscribe(&stream).await
-                                    {
-                                        warn!(
-                                            stream = %stream,
-                                            error = %e,
-                                            "Failed to subscribe pubsub"
-                                        );
-                                    }
-                                }
-
-                                for stream in removed_streams {
-                                    hub.unsubscribe_from_stream(conn_id, &stream);
-                                    if hub.stream_subscriber_count(&stream) == 0
-                                        && let Some(ref ps) = pubsub
-                                        && let Err(e) = ps.unsubscribe(&stream).await
-                                    {
-                                        warn!(
-                                            stream = %stream,
-                                            error = %e,
-                                            "Failed to unsubscribe pubsub"
-                                        );
-                                    }
-                                }
+                                apply_stream_changes(
+                                    &hub,
+                                    &pubsub,
+                                    conn_id,
+                                    added_streams,
+                                    removed_streams,
+                                )
+                                .await;
 
                                 // Handle presence leave on unsubscribe
                                 if let Some(pstream) = presence_stream {
@@ -964,63 +947,19 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         ClientCommand::Message { identifier, data } => {
-                            let command = "message";
-
-                            let (path, headers, cstate, istate, connection_identifiers) =
-                                match hub.get_session(conn_id) {
-                                    Some(session) => (
-                                        session.path.clone(),
-                                        session.headers.clone(),
-                                        session.cstate.clone(),
-                                        session.istate_for(&identifier),
-                                        session.connection_identifiers.clone().unwrap_or_default(),
-                                    ),
-                                    None => {
-                                        warn!(conn_id, "Received command for unknown session");
-                                        continue;
-                                    }
-                                };
-
-                            let env =
-                                build_env(&path, &headers, &config.rpc_headers, cstate, istate);
-
-                            let message = CommandMessage {
-                                command: command.to_string(),
-                                identifier: identifier.clone(),
-                                connection_identifiers,
+                            let Some((response, status)) = exchange_command(
+                                &rpc,
+                                &hub,
+                                &config,
+                                conn_id,
+                                "message",
+                                &identifier,
                                 data,
-                                env: Some(env),
-                            };
-
-                            let response = match rpc.command(message).await {
-                                Ok(response) => response,
-                                Err(e) => {
-                                    error!(conn_id, error = %e, "RPC command failed");
-                                    close_connection(
-                                        &rpc,
-                                        &hub,
-                                        conn_id,
-                                        1011,
-                                        "rpc_command_failed",
-                                        &config,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            };
-
-                            let status = status_from(response.status);
-                            send_transmissions(&hub, conn_id, response.transmissions).await;
-
-                            if response.disconnect || status == Status::Error {
-                                let reason = if response.error_msg.is_empty() {
-                                    "rpc_disconnect"
-                                } else {
-                                    response.error_msg.as_str()
-                                };
-                                close_connection(&rpc, &hub, conn_id, 1000, reason, &config).await;
+                            )
+                            .await
+                            else {
                                 continue;
-                            }
+                            };
 
                             if status == Status::Success
                                 && let Some(mut session) = hub.get_session_mut(conn_id)
@@ -1036,19 +975,8 @@ async fn main() -> anyhow::Result<()> {
                             identifier,
                             presence: presence_data,
                         } => {
-                            // Get presence stream from session
-                            let presence_stream = match hub.get_session(conn_id) {
-                                Some(session) => session
-                                    .get_presence_stream(&identifier)
-                                    .map(|s| s.to_string()),
-                                None => {
-                                    warn!(conn_id, "Received join for unknown session");
-                                    continue;
-                                }
-                            };
-
-                            let Some(pstream) = presence_stream else {
-                                warn!(conn_id, identifier, "No presence stream for subscription");
+                            let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
+                            else {
                                 continue;
                             };
 
@@ -1072,19 +1000,8 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         ClientCommand::Leave { identifier } => {
-                            // Get presence stream from session
-                            let presence_stream = match hub.get_session(conn_id) {
-                                Some(session) => session
-                                    .get_presence_stream(&identifier)
-                                    .map(|s| s.to_string()),
-                                None => {
-                                    warn!(conn_id, "Received leave for unknown session");
-                                    continue;
-                                }
-                            };
-
-                            let Some(pstream) = presence_stream else {
-                                warn!(conn_id, identifier, "No presence stream for subscription");
+                            let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
+                            else {
                                 continue;
                             };
 
@@ -1094,19 +1011,8 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         ClientCommand::Presence { identifier } => {
-                            // Get presence stream from session
-                            let presence_stream = match hub.get_session(conn_id) {
-                                Some(session) => session
-                                    .get_presence_stream(&identifier)
-                                    .map(|s| s.to_string()),
-                                None => {
-                                    warn!(conn_id, "Received presence query for unknown session");
-                                    continue;
-                                }
-                            };
-
-                            let Some(pstream) = presence_stream else {
-                                warn!(conn_id, identifier, "No presence stream for subscription");
+                            let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
+                            else {
                                 continue;
                             };
 

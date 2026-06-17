@@ -185,6 +185,27 @@ impl PresenceStore {
         }
     }
 
+    /// Remove the given presence ids from a stream's records, appending a LEAVE
+    /// event for each to `events`.
+    fn emit_leaves(
+        records: &mut HashMap<String, PresenceRecord>,
+        stream: &str,
+        ids: Vec<String>,
+        events: &mut Vec<(String, PresenceEvent)>,
+    ) {
+        for presence_id in ids {
+            records.remove(&presence_id);
+            events.push((
+                stream.to_string(),
+                PresenceEvent {
+                    event_type: PRESENCE_LEAVE.to_string(),
+                    id: presence_id,
+                    info: None,
+                },
+            ));
+        }
+    }
+
     /// Remove expired presence records, returning leave events
     pub fn expire(&self) -> Vec<(String, PresenceEvent)> {
         let now = Instant::now();
@@ -200,17 +221,7 @@ impl PresenceStore {
                 .map(|(id, _)| id.clone())
                 .collect();
 
-            for presence_id in expired {
-                records.remove(&presence_id);
-                events.push((
-                    stream.clone(),
-                    PresenceEvent {
-                        event_type: PRESENCE_LEAVE.to_string(),
-                        id: presence_id,
-                        info: None,
-                    },
-                ));
-            }
+            Self::emit_leaves(records, &stream, expired, &mut events);
         }
 
         events
@@ -234,17 +245,7 @@ impl PresenceStore {
                 }
             }
 
-            for presence_id in to_remove {
-                records.remove(&presence_id);
-                events.push((
-                    stream.clone(),
-                    PresenceEvent {
-                        event_type: PRESENCE_LEAVE.to_string(),
-                        id: presence_id,
-                        info: None,
-                    },
-                ));
-            }
+            Self::emit_leaves(records, &stream, to_remove, &mut events);
         }
 
         events

@@ -69,12 +69,18 @@ impl Hub {
         self.sessions.insert(conn_id, session);
     }
 
-    /// Subscribe a session to the ping broadcast
-    fn subscribe_to_pings(&self, conn_id: u32) {
-        let mut rx = self.ping_tx.subscribe();
+    /// Spawn a task forwarding broadcast payloads from `rx` to this session's
+    /// outgoing channel as text Cargo, until the channel closes or the outgoing
+    /// channel is gone. `stream` names the stream for log context; `None` marks
+    /// the shared ping channel.
+    fn spawn_forwarder(
+        &self,
+        conn_id: u32,
+        mut rx: broadcast::Receiver<Vec<u8>>,
+        stream: Option<String>,
+    ) -> tokio::task::JoinHandle<()> {
         let outgoing_tx = self.outgoing_tx.clone();
-
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(payload) => {
@@ -83,15 +89,23 @@ impl Hub {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!(conn_id, lagged = n, "ping receiver lagged");
-                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => match stream {
+                        Some(ref name) => {
+                            warn!(conn_id, stream = %name, lagged = n, "receiver lagged")
+                        }
+                        None => debug!(conn_id, lagged = n, "ping receiver lagged"),
+                    },
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
                     }
                 }
             }
-        });
+        })
+    }
+
+    /// Subscribe a session to the ping broadcast
+    fn subscribe_to_pings(&self, conn_id: u32) {
+        let handle = self.spawn_forwarder(conn_id, self.ping_tx.subscribe(), None);
 
         // Store ping task handle for cleanup on session removal
         if let Some(mut subs) = self.subscriptions.get_mut(&conn_id) {
@@ -166,28 +180,8 @@ impl Hub {
             .clone();
 
         // Get a receiver and spawn forwarding task
-        let mut rx = sender.subscribe();
-        let outgoing_tx = self.outgoing_tx.clone();
-        let stream_name = stream.to_string();
-
-        let handle = tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(payload) => {
-                        let cargo = Cargo::text(conn_id, payload);
-                        if outgoing_tx.send(Outgoing::Cargo(cargo)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(conn_id, stream = %stream_name, lagged = n, "receiver lagged");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-        });
+        let handle =
+            self.spawn_forwarder(conn_id, sender.subscribe(), Some(stream.to_string()));
 
         // Store abort handle
         if let Some(mut subs) = self.subscriptions.get_mut(&conn_id) {
