@@ -56,22 +56,14 @@ impl AnyCableRpc {
         Res: prost::Message + Default + 'static,
     {
         let mut grpc = Grpc::new(self.channel.clone());
-        grpc.ready()
-            .await
-            .context("AnyCable RPC service not ready")?;
+        grpc.ready().await.context("AnyCable RPC service not ready")?;
         let mut request = Request::new(message);
-        request
-            .metadata_mut()
-            .insert("protov", MetadataValue::from_static(PROTO_VERSIONS));
+        request.metadata_mut().insert("protov", MetadataValue::from_static(PROTO_VERSIONS));
         if let Some(timeout) = self.timeout {
             request.set_timeout(timeout);
         }
         let response = grpc
-            .unary(
-                request,
-                PathAndQuery::from_static(path),
-                ProstCodec::default(),
-            )
+            .unary(request, PathAndQuery::from_static(path), ProstCodec::default())
             .await?
             .into_inner();
         Ok(response)

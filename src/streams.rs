@@ -72,9 +72,7 @@ impl StreamsConfig {
 
     /// Get the secret for CableReady
     pub fn get_cable_ready_secret(&self) -> Option<&str> {
-        self.cable_ready_secret
-            .as_deref()
-            .or(self.secret.as_deref())
+        self.cable_ready_secret.as_deref().or(self.secret.as_deref())
     }
 }
 
@@ -86,9 +84,7 @@ pub struct MessageVerifier {
 impl MessageVerifier {
     /// Create a new verifier with the given secret key
     pub fn new(key: &str) -> Self {
-        Self {
-            key: key.as_bytes().to_vec(),
-        }
+        Self { key: key.as_bytes().to_vec() }
     }
 
     /// Verify a signed message and return the decoded payload
@@ -207,12 +203,7 @@ impl StreamsController {
         let turbo_verifier = config.get_turbo_secret().map(MessageVerifier::new);
         let cable_ready_verifier = config.get_cable_ready_secret().map(MessageVerifier::new);
 
-        Self {
-            config,
-            pubsub_verifier,
-            turbo_verifier,
-            cable_ready_verifier,
-        }
+        Self { config, pubsub_verifier, turbo_verifier, cable_ready_verifier }
     }
 
     /// Check if an identifier should be handled by this controller
@@ -233,10 +224,8 @@ impl StreamsController {
     /// Resolve a subscription request to a stream
     pub fn resolve(&self, identifier: &str) -> Result<StreamResult, StreamError> {
         let parsed: serde_json::Value = serde_json::from_str(identifier)?;
-        let channel = parsed
-            .get("channel")
-            .and_then(|c| c.as_str())
-            .ok_or(StreamError::MissingChannel)?;
+        let channel =
+            parsed.get("channel").and_then(|c| c.as_str()).ok_or(StreamError::MissingChannel)?;
 
         match channel {
             PUBSUB_CHANNEL => self.resolve_pubsub(identifier),
@@ -300,10 +289,7 @@ impl StreamsController {
         }
 
         let request: CableReadyRequest = serde_json::from_str(identifier)?;
-        let verifier = self
-            .cable_ready_verifier
-            .as_ref()
-            .ok_or(StreamError::NoSecret)?;
+        let verifier = self.cable_ready_verifier.as_ref().ok_or(StreamError::NoSecret)?;
         let stream = verifier.verify(&request.identifier)?;
 
         debug!(stream, "verified CableReady stream");
@@ -411,10 +397,7 @@ mod tests {
         let verifier = MessageVerifier::new("test-secret");
 
         let signed = verifier.sign("notifications:123").unwrap();
-        let identifier = format!(
-            r#"{{"channel":"$pubsub","signed_stream_name":"{}"}}"#,
-            signed
-        );
+        let identifier = format!(r#"{{"channel":"$pubsub","signed_stream_name":"{}"}}"#, signed);
 
         assert!(controller.handles(&identifier));
 
@@ -424,10 +407,7 @@ mod tests {
 
     #[test]
     fn test_streams_controller_public() {
-        let config = StreamsConfig {
-            public: true,
-            ..Default::default()
-        };
+        let config = StreamsConfig { public: true, ..Default::default() };
         let controller = StreamsController::new(config);
 
         let identifier = r#"{"channel":"$pubsub","stream_name":"public:stream"}"#;
@@ -466,10 +446,8 @@ mod tests {
         let verifier = MessageVerifier::new("turbo-secret");
 
         let signed = verifier.sign("posts:1").unwrap();
-        let identifier = format!(
-            r#"{{"channel":"Turbo::StreamsChannel","signed_stream_name":"{}"}}"#,
-            signed
-        );
+        let identifier =
+            format!(r#"{{"channel":"Turbo::StreamsChannel","signed_stream_name":"{}"}}"#, signed);
 
         assert!(controller.handles(&identifier));
 

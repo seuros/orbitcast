@@ -26,11 +26,7 @@ mod tests {
 
     #[test]
     fn test_cargo_roundtrip() {
-        let cargo = Cargo {
-            conn_id: 42,
-            kind: CargoKind::Text,
-            data: b"test payload".to_vec(),
-        };
+        let cargo = Cargo { conn_id: 42, kind: CargoKind::Text, data: b"test payload".to_vec() };
         let encoded = encode_cargo(&cargo);
         let (msg_type, len) = decode_header(&encoded).unwrap();
         assert_eq!(msg_type, MessageType::Cargo);

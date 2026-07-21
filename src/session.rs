@@ -120,10 +120,7 @@ impl Session {
 
     /// Get subscription state for RPC
     pub fn istate_for(&self, identifier: &str) -> HashMap<String, String> {
-        self.istate
-            .get(identifier)
-            .cloned()
-            .unwrap_or_else(HashMap::new)
+        self.istate.get(identifier).cloned().unwrap_or_else(HashMap::new)
     }
 
     /// Encode subscription state map for disconnect request
@@ -143,10 +140,7 @@ impl Session {
         identifier: &str,
         streams: &[String],
     ) -> Vec<String> {
-        let entry = self
-            .subscription_streams
-            .entry(identifier.to_string())
-            .or_default();
+        let entry = self.subscription_streams.entry(identifier.to_string()).or_default();
 
         let mut added = Vec::new();
         for stream in streams {
@@ -195,10 +189,7 @@ impl Session {
     fn prune_streams(&mut self, streams: Vec<String>) -> Vec<String> {
         let mut removed = Vec::new();
         for stream in streams {
-            let still_used = self
-                .subscription_streams
-                .values()
-                .any(|set| set.contains(&stream));
+            let still_used = self.subscription_streams.values().any(|set| set.contains(&stream));
             if !still_used && self.streams.remove(&stream) {
                 removed.push(stream);
             }
@@ -210,10 +201,7 @@ impl Session {
     /// Get header value (case-insensitive)
     pub fn get_header(&self, name: &str) -> Option<&str> {
         let name_lower = name.to_lowercase();
-        self.headers
-            .iter()
-            .find(|(k, _)| k.to_lowercase() == name_lower)
-            .map(|(_, v)| v.as_str())
+        self.headers.iter().find(|(k, _)| k.to_lowercase() == name_lower).map(|(_, v)| v.as_str())
     }
 
     /// Set presence stream for a subscription identifier

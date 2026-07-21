@@ -133,16 +133,12 @@ pub fn parse_command(data: &[u8]) -> Result<ClientCommand, ActionCableError> {
 /// Encode a server message to bytes
 pub fn encode(msg: &ServerMessage) -> Vec<u8> {
     match msg {
-        ServerMessage::Welcome { sid } => serde_json::to_vec(&WelcomePayload {
-            msg_type: "welcome",
-            sid: sid.clone(),
-        })
-        .unwrap(),
-        ServerMessage::Ping { timestamp } => serde_json::to_vec(&PingPayload {
-            msg_type: "ping",
-            message: *timestamp,
-        })
-        .unwrap(),
+        ServerMessage::Welcome { sid } => {
+            serde_json::to_vec(&WelcomePayload { msg_type: "welcome", sid: sid.clone() }).unwrap()
+        }
+        ServerMessage::Ping { timestamp } => {
+            serde_json::to_vec(&PingPayload { msg_type: "ping", message: *timestamp }).unwrap()
+        }
         ServerMessage::ConfirmSubscription { identifier } => {
             serde_json::to_vec(&SubscriptionPayload {
                 msg_type: "confirm_subscription",
@@ -157,10 +153,7 @@ pub fn encode(msg: &ServerMessage) -> Vec<u8> {
             })
             .unwrap()
         }
-        ServerMessage::Message {
-            identifier,
-            message,
-        } => serde_json::to_vec(&MessagePayload {
+        ServerMessage::Message { identifier, message } => serde_json::to_vec(&MessagePayload {
             identifier: identifier.clone(),
             message: message.clone(),
         })
@@ -225,9 +218,7 @@ mod tests {
 
     #[test]
     fn test_encode_welcome() {
-        let msg = ServerMessage::Welcome {
-            sid: "abc123".to_string(),
-        };
+        let msg = ServerMessage::Welcome { sid: "abc123".to_string() };
         let encoded = encode(&msg);
         let json: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(json["type"], "welcome");
@@ -236,9 +227,7 @@ mod tests {
 
     #[test]
     fn test_encode_ping() {
-        let msg = ServerMessage::Ping {
-            timestamp: 1234567890,
-        };
+        let msg = ServerMessage::Ping { timestamp: 1234567890 };
         let encoded = encode(&msg);
         let json: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(json["type"], "ping");
@@ -247,9 +236,7 @@ mod tests {
 
     #[test]
     fn test_encode_confirm_subscription() {
-        let msg = ServerMessage::ConfirmSubscription {
-            identifier: "chat_1".to_string(),
-        };
+        let msg = ServerMessage::ConfirmSubscription { identifier: "chat_1".to_string() };
         let encoded = encode(&msg);
         let json: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(json["type"], "confirm_subscription");
@@ -270,10 +257,8 @@ mod tests {
 
     #[test]
     fn test_encode_disconnect() {
-        let msg = ServerMessage::Disconnect {
-            reason: "server_restart".to_string(),
-            reconnect: true,
-        };
+        let msg =
+            ServerMessage::Disconnect { reason: "server_restart".to_string(), reconnect: true };
         let encoded = encode(&msg);
         let json: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(json["type"], "disconnect");
@@ -290,10 +275,7 @@ mod tests {
         }"#;
         let cmd = parse_command(json).unwrap();
         match cmd {
-            ClientCommand::Join {
-                identifier,
-                presence,
-            } => {
+            ClientCommand::Join { identifier, presence } => {
                 assert_eq!(identifier, "chat_1");
                 let p = presence.unwrap();
                 assert_eq!(p.id, "user_42");
@@ -308,10 +290,7 @@ mod tests {
         let json = br#"{"command":"join","identifier":"chat_1"}"#;
         let cmd = parse_command(json).unwrap();
         match cmd {
-            ClientCommand::Join {
-                identifier,
-                presence,
-            } => {
+            ClientCommand::Join { identifier, presence } => {
                 assert_eq!(identifier, "chat_1");
                 assert!(presence.is_none());
             }

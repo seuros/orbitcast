@@ -75,10 +75,7 @@ pub struct PresenceStore {
 impl PresenceStore {
     /// Create a new presence store with the given TTL
     pub fn new(ttl_seconds: u64) -> Self {
-        Self {
-            records: DashMap::new(),
-            ttl: Duration::from_secs(ttl_seconds),
-        }
+        Self { records: DashMap::new(), ttl: Duration::from_secs(ttl_seconds) }
     }
 
     /// Add a presence record. Returns Some(event) if this is a new join.
@@ -172,10 +169,7 @@ impl PresenceStore {
         let records: Vec<PresenceInfoRecord> = stream_records
             .values()
             .filter(|r| r.expires_at > now)
-            .map(|r| PresenceInfoRecord {
-                id: r.id.clone(),
-                info: r.info.clone(),
-            })
+            .map(|r| PresenceInfoRecord { id: r.id.clone(), info: r.info.clone() })
             .collect();
 
         PresenceInfo {
@@ -306,12 +300,8 @@ mod tests {
     #[test]
     fn test_join_new_presence() {
         let store = PresenceStore::new(60);
-        let event = store.join(
-            "chat:1",
-            "session_1",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
+        let event =
+            store.join("chat:1", "session_1", "user_42", serde_json::json!({"name": "Marissa"}));
 
         assert!(event.is_some());
         let event = event.unwrap();
@@ -324,21 +314,13 @@ mod tests {
         let store = PresenceStore::new(60);
 
         // First join
-        let event1 = store.join(
-            "chat:1",
-            "session_1",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
+        let event1 =
+            store.join("chat:1", "session_1", "user_42", serde_json::json!({"name": "Marissa"}));
         assert!(event1.is_some());
 
         // Second join (same presence ID, different session)
-        let event2 = store.join(
-            "chat:1",
-            "session_2",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
+        let event2 =
+            store.join("chat:1", "session_2", "user_42", serde_json::json!({"name": "Marissa"}));
         assert!(event2.is_none()); // Should not emit join for existing presence
     }
 
@@ -346,12 +328,7 @@ mod tests {
     fn test_leave_last_session() {
         let store = PresenceStore::new(60);
 
-        store.join(
-            "chat:1",
-            "session_1",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
+        store.join("chat:1", "session_1", "user_42", serde_json::json!({"name": "Marissa"}));
 
         let event = store.leave("chat:1", "session_1");
         assert!(event.is_some());
@@ -364,18 +341,8 @@ mod tests {
     fn test_leave_not_last_session() {
         let store = PresenceStore::new(60);
 
-        store.join(
-            "chat:1",
-            "session_1",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
-        store.join(
-            "chat:1",
-            "session_2",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
+        store.join("chat:1", "session_1", "user_42", serde_json::json!({"name": "Marissa"}));
+        store.join("chat:1", "session_2", "user_42", serde_json::json!({"name": "Marissa"}));
 
         let event = store.leave("chat:1", "session_1");
         assert!(event.is_none()); // Should not emit leave if other sessions remain
@@ -385,18 +352,8 @@ mod tests {
     fn test_presence_info() {
         let store = PresenceStore::new(60);
 
-        store.join(
-            "chat:1",
-            "session_1",
-            "user_42",
-            serde_json::json!({"name": "Marissa"}),
-        );
-        store.join(
-            "chat:1",
-            "session_2",
-            "user_13",
-            serde_json::json!({"name": "Marissa"}),
-        );
+        store.join("chat:1", "session_1", "user_42", serde_json::json!({"name": "Marissa"}));
+        store.join("chat:1", "session_2", "user_13", serde_json::json!({"name": "Marissa"}));
 
         let info = store.info("chat:1");
         assert_eq!(info.total, 2);

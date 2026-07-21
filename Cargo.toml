@@ -3,7 +3,7 @@ name = "orbitcast"
 version = "0.2.0"
 exclude = ["Cargo.lock"]
 edition = "2024"
-rust-version = "1.95"
+rust-version.workspace = true
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
 description = "Real-time WebSocket server with ActionCable protocol for Mothership"
 readme = "README.md"
@@ -31,7 +31,7 @@ path = "src/main.rs"
 tokio = { version = "1.47", features = ["full", "signal"] }
 
 # Rama - WebSocket layer
-rama = { version = "0.3.0-rc1", git = "https://github.com/plabayo/rama", branch = "main", features = ["http-full"] }
+rama = { workspace = true, features = ["http-full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

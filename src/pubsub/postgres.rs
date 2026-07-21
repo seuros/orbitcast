@@ -159,28 +159,24 @@ impl PostgresPubSub {
             SslMode::Disable => Self::connect_no_tls(connection_string).await,
             SslMode::Allow => match Self::connect_no_tls(connection_string).await {
                 Ok(conn) => Ok(conn),
-                Err(no_tls_err) => Self::connect_tls(connection_string)
-                    .await
-                    .map_err(|tls_err| {
-                        anyhow::anyhow!(
-                            "non-TLS connection failed ({}); TLS connection failed ({})",
-                            no_tls_err,
-                            tls_err
-                        )
-                    }),
+                Err(no_tls_err) => Self::connect_tls(connection_string).await.map_err(|tls_err| {
+                    anyhow::anyhow!(
+                        "non-TLS connection failed ({}); TLS connection failed ({})",
+                        no_tls_err,
+                        tls_err
+                    )
+                }),
             },
             SslMode::Prefer => match Self::connect_tls(connection_string).await {
                 Ok(conn) => Ok(conn),
                 Err(tls_err) => {
-                    Self::connect_no_tls(connection_string)
-                        .await
-                        .map_err(|no_tls_err| {
-                            anyhow::anyhow!(
-                                "TLS connection failed ({}); non-TLS connection failed ({})",
-                                tls_err,
-                                no_tls_err
-                            )
-                        })
+                    Self::connect_no_tls(connection_string).await.map_err(|no_tls_err| {
+                        anyhow::anyhow!(
+                            "TLS connection failed ({}); non-TLS connection failed ({})",
+                            tls_err,
+                            no_tls_err
+                        )
+                    })
                 }
             },
             SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
@@ -207,9 +203,7 @@ impl PubSub for PostgresPubSub {
         let encoded = base64_encode(payload);
 
         // Use pg_notify function for safe parameter binding
-        client
-            .execute("SELECT pg_notify($1, $2)", &[&channel, &encoded])
-            .await?;
+        client.execute("SELECT pg_notify($1, $2)", &[&channel, &encoded]).await?;
 
         Ok(())
     }
@@ -313,9 +307,7 @@ impl PostgresPubSub {
                     tracing::info!("Subscribed to channel: {}", channel);
                 }
                 for channel in to_remove {
-                    client
-                        .batch_execute(&format!("UNLISTEN {}", channel))
-                        .await?;
+                    client.batch_execute(&format!("UNLISTEN {}", channel)).await?;
                     current_subs.remove(&channel);
                     tracing::info!("Unsubscribed from channel: {}", channel);
                 }
@@ -448,21 +440,9 @@ mod tests {
 
     #[test]
     fn test_channel_for_stream() {
-        assert_eq!(
-            PostgresPubSub::channel_for_stream("test"),
-            "oc_f9e6e6ef197c2b25"
-        );
-        assert_eq!(
-            PostgresPubSub::channel_for_stream("test-channel"),
-            "oc_35532a9354f87833"
-        );
-        assert_eq!(
-            PostgresPubSub::channel_for_stream("123"),
-            "oc_456fc2181822c4db"
-        );
-        assert_eq!(
-            PostgresPubSub::channel_for_stream("my.channel"),
-            "oc_f3e42e433c3c0e76"
-        );
+        assert_eq!(PostgresPubSub::channel_for_stream("test"), "oc_f9e6e6ef197c2b25");
+        assert_eq!(PostgresPubSub::channel_for_stream("test-channel"), "oc_35532a9354f87833");
+        assert_eq!(PostgresPubSub::channel_for_stream("123"), "oc_456fc2181822c4db");
+        assert_eq!(PostgresPubSub::channel_for_stream("my.channel"), "oc_f3e42e433c3c0e76");
     }
 }

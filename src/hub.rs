@@ -180,8 +180,7 @@ impl Hub {
             .clone();
 
         // Get a receiver and spawn forwarding task
-        let handle =
-            self.spawn_forwarder(conn_id, sender.subscribe(), Some(stream.to_string()));
+        let handle = self.spawn_forwarder(conn_id, sender.subscribe(), Some(stream.to_string()));
 
         // Store abort handle
         if let Some(mut subs) = self.subscriptions.get_mut(&conn_id) {
@@ -222,10 +221,7 @@ impl Hub {
 
     /// Get subscriber count for a stream
     pub fn stream_subscriber_count(&self, stream: &str) -> usize {
-        self.streams
-            .get(stream)
-            .map(|s| s.receiver_count())
-            .unwrap_or(0)
+        self.streams.get(stream).map(|s| s.receiver_count()).unwrap_or(0)
     }
 
     /// Broadcast message to all subscribers of a stream (O(1) fan-out)
@@ -288,11 +284,7 @@ impl Hub {
 
     /// Disconnect a specific connection
     pub async fn disconnect(&self, conn_id: u32, code: u16, reason: &str) {
-        let disembark = crate::protocol::Disembark {
-            conn_id,
-            code,
-            reason: reason.to_string(),
-        };
+        let disembark = crate::protocol::Disembark { conn_id, code, reason: reason.to_string() };
 
         if let Err(e) = self.outgoing_tx.send(Outgoing::Disembark(disembark)).await {
             warn!(conn_id, error = %e, "failed to send disembark");
@@ -306,19 +298,13 @@ impl Hub {
             session.set_identifier(identifier.clone());
         }
 
-        self.identifiers
-            .entry(identifier)
-            .or_default()
-            .push(conn_id);
+        self.identifiers.entry(identifier).or_default().push(conn_id);
     }
 
     /// Get all connection IDs for an identifier
     #[allow(dead_code)]
     pub fn get_connections_by_identifier(&self, identifier: &str) -> Vec<u32> {
-        self.identifiers
-            .get(identifier)
-            .map(|entry| entry.clone())
-            .unwrap_or_default()
+        self.identifiers.get(identifier).map(|entry| entry.clone()).unwrap_or_default()
     }
 
     /// Get session count

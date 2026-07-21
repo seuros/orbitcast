@@ -102,10 +102,7 @@ fn filter_headers(
     allowlist: &[String],
 ) -> HashMap<String, String> {
     if allowlist.is_empty() {
-        return headers
-            .iter()
-            .map(|(k, v)| (k.to_lowercase(), v.clone()))
-            .collect();
+        return headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
     }
 
     let allowed: std::collections::HashSet<String> =
@@ -120,10 +117,7 @@ fn filter_headers(
 
 fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
     let name_lower = name.to_lowercase();
-    headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == name_lower)
-        .map(|(_, v)| v.as_str())
+    headers.iter().find(|(k, _)| k.to_lowercase() == name_lower).map(|(_, v)| v.as_str())
 }
 
 fn build_request_url(path: &str, headers: &HashMap<String, String>) -> String {
@@ -356,10 +350,7 @@ async fn dock<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     ship_name: &str,
 ) -> anyhow::Result<Moored> {
     // Send DOCK message
-    let dock = protocol::Dock {
-        version: protocol::VERSION,
-        ship: ship_name.to_string(),
-    };
+    let dock = protocol::Dock { version: protocol::VERSION, ship: ship_name.to_string() };
     let encoded = protocol::encode_dock(&dock);
     stream.write_all(&encoded).await?;
     info!(version = protocol::VERSION, ship = %ship_name, "Sent DOCK");
@@ -403,10 +394,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Initialize JSON logging (consistent with Mothership)
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(&args.log_level)
-        .init();
+    tracing_subscriber::fmt().json().with_env_filter(&args.log_level).init();
 
     info!("OrbitCast v{}", env!("CARGO_PKG_VERSION"));
 
@@ -510,10 +498,8 @@ async fn main() -> anyhow::Result<()> {
                     let hub = hub_clone.clone();
                     // Wrap in message format and broadcast
                     if let Ok(message) = serde_json::from_slice::<serde_json::Value>(&payload) {
-                        let broadcast = ServerMessage::Message {
-                            identifier: stream.clone(),
-                            message,
-                        };
+                        let broadcast =
+                            ServerMessage::Message { identifier: stream.clone(), message };
                         let encoded = actioncable::encode(&broadcast);
                         // O(1) broadcast via tokio::sync::broadcast
                         hub.broadcast(&stream, &encoded);
@@ -533,10 +519,7 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(Duration::from_secs(ping_interval));
         loop {
             interval.tick().await;
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
             let ping = ServerMessage::Ping { timestamp };
             let payload = actioncable::encode(&ping);
 
@@ -971,10 +954,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         }
-                        ClientCommand::Join {
-                            identifier,
-                            presence: presence_data,
-                        } => {
+                        ClientCommand::Join { identifier, presence: presence_data } => {
                             let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
                             else {
                                 continue;
@@ -1029,9 +1009,9 @@ async fn main() -> anyhow::Result<()> {
                         ClientCommand::Whisper { identifier, data } => {
                             // Get whisper stream from session
                             let whisper_stream = match hub.get_session(conn_id) {
-                                Some(session) => session
-                                    .get_whisper_stream(&identifier)
-                                    .map(|s| s.to_string()),
+                                Some(session) => {
+                                    session.get_whisper_stream(&identifier).map(|s| s.to_string())
+                                }
                                 None => {
                                     warn!(conn_id, "Received whisper for unknown session");
                                     continue;
