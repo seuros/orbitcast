@@ -137,9 +137,17 @@ jobs:
         # runner's system Python is PEP 668 "externally managed". Its bin dir
         # is already on PATH on these images (PIPX_BIN_DIR=/opt/pipx_bin) —
         # do not hardcode $HOME/.local/bin, which is not where it lands here.
+        #
+        # pipx only exposes cargo-zigbuild's own entry point on PATH, not its
+        # `ziglang` dependency's script — and that script is named
+        # `python-zig`, not `zig` (ziglang avoids shadowing a real `zig`).
+        # Point cargo-zigbuild at it explicitly via CARGO_ZIGBUILD_ZIG_PATH.
         run: |
           pipx install "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}"
           cargo-zigbuild --version
+          venv="$(pipx environment --value PIPX_LOCAL_VENVS)/cargo-zigbuild"
+          "$venv/bin/python-zig" version
+          echo "CARGO_ZIGBUILD_ZIG_PATH=$venv/bin/python-zig" >> "$GITHUB_ENV"
 
       - uses: ruby/setup-ruby@v1
         with:
