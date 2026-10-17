@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/seuros/orbitcast/compare/v0.3.0...v0.3.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **release:** find cargo-zigbuild on PATH, not a hardcoded pipx dir ([0b958c9](https://github.com/seuros/orbitcast/commit/0b958c9b2cfda3029a1523712d4fe38f683f9283))
+
 ## [0.3.0](https://github.com/seuros/orbitcast/compare/v0.2.0...v0.3.0) (2026-10-17)
 
 
