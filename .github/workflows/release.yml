@@ -1,10 +1,11 @@
 # Release: build the five native-gem platforms for an EXISTING release-please
-# tag, smoke-test every packaged gem on a fresh machine of its own platform
-# (offline install, binary floor inspection, real WebSocket + PostgreSQL round
-# trip on Linux, fail-closed start on macOS), verify version lockstep, attest
-# provenance, attach a CycloneDX SBOM, and attach the gems + binaries +
-# SHA256SUMS to the GitHub release. Pushing to rubygems.org is `rake
-# gems:push`, by hand (tasks/release.rake).
+# tag, verify version lockstep, attest provenance, attach a CycloneDX SBOM,
+# and attach the gems + binaries + SHA256SUMS to the GitHub release. Pushing
+# to rubygems.org is `rake gems:push`, by hand (tasks/release.rake).
+#
+# No smoke tests: nothing here installs a packaged gem on a fresh machine or
+# exercises the binary (offline install, floor inspection, a real WS/pg round
+# trip, musl-vs-gnu platform refusal). Verify by hand before trusting a gem.
 #
 # Invocation:
 # - workflow_call from release-please.yml with the exact tag it created.
@@ -20,8 +21,8 @@
 # Platform floors (tasks/native.rake): *-linux-gnu gems are cross-linked
 # against glibc 2.34 with cargo-zigbuild so the floor is a build input rather
 # than whatever glibc the runner image ships (ubuntu-24.04 = 2.39); Darwin
-# gems export MACOSX_DEPLOYMENT_TARGET=13.0. The smoke jobs assert both from
-# the binary itself.
+# gems export MACOSX_DEPLOYMENT_TARGET=13.0. Nothing in this workflow asserts
+# either from the binary itself anymore (smoke tests removed).
 name: Release
 
 on:
@@ -190,157 +191,9 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # Smoke on a FRESH runner that never built anything: the gem is downloaded
-  # and installed offline, exactly as a deployment would. macOS has no
-  # PostgreSQL service, so it runs the no-database variant: the relay must
-  # refuse to start (invariant 7) rather than idle unready.
-  smoke-macos:
-    name: Smoke ${{ matrix.platform }}
-    needs: [verify-tag, build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: arm64-darwin
-            os: macos-14
-          - platform: x86_64-darwin
-            os: macos-15-intel
-    runs-on: ${{ matrix.os }}
-    env:
-      SMOKE_REQUIRE_DOCTOR: "1"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.verify-tag.outputs.tag }}
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "4.0"
-
-      - name: Download gem
-        uses: actions/download-artifact@v8
-        with:
-          name: gem-${{ matrix.platform }}
-          path: pkg
-
-      - name: Smoke (offline install, otool, --version, doctor, fail-closed start)
-        run: rake "native:smoke[${{ matrix.platform }}]"
-
-  # Linux GNU: offline install, glibc symbol floor + ldd inspection, then the
-  # full WebSocket + pg_notify + SIGTERM round trip against PostgreSQL 18.
-  smoke-linux-gnu:
-    name: Smoke ${{ matrix.platform }}
-    needs: [verify-tag, build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: x86_64-linux-gnu
-            os: ubuntu-24.04
-          - platform: aarch64-linux-gnu
-            os: ubuntu-24.04-arm
-    runs-on: ${{ matrix.os }}
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: orbitcast
-          POSTGRES_PASSWORD: orbitcast
-          POSTGRES_DB: orbitcast_smoke
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      SMOKE_DATABASE_URL: postgres://orbitcast:orbitcast@localhost:5432/orbitcast_smoke
-      SMOKE_REQUIRE_DOCTOR: "1"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.verify-tag.outputs.tag }}
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "4.0"
-
-      # Pre-provisioned native prerequisites: the pg gem and the
-      # binutils the floor inspection uses. Everything after this step is
-      # offline for RubyGems (`gem install --local`).
-      - name: Provision pg + binutils
-        run: |
-          sudo apt-get update && sudo apt-get install -y libpq-dev binutils
-          gem install pg --no-document
-
-      - name: Download gem
-        uses: actions/download-artifact@v8
-        with:
-          name: gem-${{ matrix.platform }}
-          path: pkg
-
-      - name: Smoke (offline install, glibc floor, ldd, --version, doctor, WS + pg_notify + SIGTERM)
-        run: rake "native:smoke[${{ matrix.platform }}]"
-
-  # musl: actual Alpine execution. The container reaches the
-  # PostgreSQL service through the host network. Additionally proves that the
-  # x86_64-linux-gnu gem is REFUSED on Alpine — a missing musl artifact must
-  # never select a GNU binary.
-  smoke-alpine:
-    name: Smoke x86_64-linux-musl (Alpine)
-    needs: [verify-tag, build]
-    runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: orbitcast
-          POSTGRES_PASSWORD: orbitcast
-          POSTGRES_DB: orbitcast_smoke
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.verify-tag.outputs.tag }}
-
-      - name: Download musl + gnu gems
-        uses: actions/download-artifact@v8
-        with:
-          pattern: gem-x86_64-linux-*
-          path: pkg
-          merge-multiple: true
-
-      - name: Smoke inside Alpine (offline install, static binary, WS + pg_notify + SIGTERM, GNU gem refused)
-        env:
-          VERSION: ${{ needs.verify-tag.outputs.version }}
-        run: |
-          docker run --rm --network host \
-            -v "$PWD:/work:ro" -w /work \
-            -e "VERSION=${VERSION}" \
-            -e SMOKE_DATABASE_URL=postgres://orbitcast:orbitcast@127.0.0.1:5432/orbitcast_smoke \
-            -e SMOKE_REQUIRE_DOCTOR=1 \
-            ruby:4.0-alpine sh -ec '
-              # Pre-provision native prerequisites, then everything is --local.
-              apk add --no-cache build-base postgresql-dev binutils >/dev/null
-              gem install pg --no-document >/dev/null
-              ruby tasks/smoke/run.rb \
-                --gem "pkg/orbitcast-${VERSION}-x86_64-linux-musl.gem" \
-                --platform x86_64-linux-musl \
-                --target x86_64-unknown-linux-musl \
-                --expect-version "${VERSION}" \
-                --refuse-gem "pkg/orbitcast-${VERSION}-x86_64-linux-gnu.gem"
-            '
-
   publish:
     name: Verify and attach to release
-    needs: [verify-tag, build, smoke-macos, smoke-linux-gnu, smoke-alpine]
+    needs: [verify-tag, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
