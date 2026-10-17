@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/orbitcast/compare/v0.2.0...v0.3.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* `streams_whisper`/`streams_presence` config keys removed; signed-mode node-local presence tracker gone; `public_streams` requires `public_streams_insecure = true`; a PostgreSQL build exits without `database_url`/`namespace` or an unreachable database; unknown docking handshake keys are startup errors; broker users must run migration 004.
+
+### Features
+
+* Rails real-time stack — native gem, signed/dispatch modes, PostgreSQL transport ([3269f6f](https://github.com/seuros/orbitcast/commit/3269f6fc9f7b26d15b38fd9e15583897febd5e43))
+
 ## [0.2.0](https://github.com/seuros/orbitcast/compare/v0.1.10...v0.2.0) (2026-05-12)
 
 
