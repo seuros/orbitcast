@@ -134,11 +134,12 @@ jobs:
       - name: Install cargo-zigbuild + Zig
         if: matrix.builder == 'zigbuild'
         # pipx (preinstalled on the Ubuntu runners) rather than pip: the
-        # runner's system Python is PEP 668 "externally managed".
+        # runner's system Python is PEP 668 "externally managed". Its bin dir
+        # is already on PATH on these images (PIPX_BIN_DIR=/opt/pipx_bin) —
+        # do not hardcode $HOME/.local/bin, which is not where it lands here.
         run: |
           pipx install "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/cargo-zigbuild" --version
+          cargo-zigbuild --version
 
       - uses: ruby/setup-ruby@v1
         with:
