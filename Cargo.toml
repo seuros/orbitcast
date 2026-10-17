@@ -1,13 +1,24 @@
+# Standalone workspace root. OrbitCast lives inside the Atlas Monkey Fleet
+# checkout but is released on its own: an empty `[workspace]` table opts this
+# crate out of the parent workspace, so a fresh clone of this repository builds
+# with its own resolution, its own lockfile, and its own release profile
+# (build isolation). The fleet root lists it under
+# `exclude`, not `members`.
+[workspace]
+# `bench/` is its own crate with its own lockfile (a load generator, never
+# shipped and never part of what the relay resolves); excluding it keeps it out
+# of this workspace entirely.
+exclude = ["bench"]
+
 [package]
 name = "orbitcast"
 version = "0.2.0"
-exclude = ["Cargo.lock"]
 edition = "2024"
-rust-version.workspace = true
+rust-version = "1.99"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
 description = "Real-time WebSocket server with ActionCable protocol for Mothership"
 readme = "README.md"
-license = "MIT"
+license = "BSD-3-Clause"
 repository = "https://github.com/seuros/orbitcast"
 homepage = "https://github.com/seuros/orbitcast"
 documentation = "https://docs.rs/orbitcast"
@@ -28,54 +39,84 @@ path = "src/main.rs"
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1.47", features = ["full", "signal"] }
+tokio = { version = "1.53", features = ["full", "signal"] }
 
-# Rama - WebSocket layer
-rama = { workspace = true, features = ["http-full"] }
+# Rama - HTTP/WebSocket layer. `tcp` is what the direct `/cable` listener binds
+# with (src/transport/http.rs); it is declared here, not inherited, so a
+# standalone checkout resolves the same version the fleet pins.
+rama = { version = "0.4.0", features = ["http-full", "tcp"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# raw_value: publications are validated as one JSON value and forwarded
+# byte-for-byte, without a per-recipient parse/re-encode round trip.
+serde_json = { version = "1.0", features = ["raw_value"] }
 
 # Configuration
-toml = "1.0"
+toml = "1.1"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # CLI
-clap = { version = "4.5", features = ["derive", "env"] }
+usage-rs = "7.0.0"
 
 # Utilities
 anyhow = "1.0"
-tonic = { version = "0.14", features = ["transport"] }
-prost = "0.14"
-tonic-prost = "0.14"
+# Wall-clock time (fleet convention); monotonic timers stay on tokio/std.
+jiff = { version = "0.2.38", default-features = false, features = ["std"] }
 
 # Crypto for signed streams
 hmac = "0.13"
 sha2 = "0.11"
 subtle = "2.6"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 
 # Docking protocol
-mothership-docking-protocol = "0.1.1"
+mothership-docking-protocol = "0.3.0"
+
+# Circuit breaking for the Rails RPC caller (fleet convention). `async` gives
+# `AsyncCircuitBreaker`, which never holds its state lock across an await.
+breaker-machines = { version = "0.20.0", features = ["async"] }
+
+# Connection/command admission control (fleet convention). Pure gates: the
+# decision is a function of caller-held state, so `src/ratelimit.rs` owns the
+# per-key table and this crate contributes no locks, tasks, or clock of its own.
+throttle-machines = "0.3.0"
 
 rcgen = "0.14"
 thiserror = "2.0"
-dashmap = "6.1"
-uuid = { version = "1.11", features = ["v4"] }
+dashmap = "6.2"
+uuid = { version = "1.27", features = ["v4"] }
 async-trait = "0.1"
 
 # PostgreSQL (optional, default)
 tokio-postgres = { version = "0.7", optional = true }
-postgres-native-tls = { version = "0.5.2", optional = true }
+postgres-native-tls = { version = "0.5.3", optional = true }
 native-tls = { version = "0.2", features = ["vendored"], optional = true }
+bytes = "1"
 
 [dev-dependencies]
-tempfile = "3.23"
+proptest = "1.12.0"
+tempfile = "3.27"
 
-[build-dependencies]
-tonic-prost-build = "0.14"
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "warn"
+dead_code_pub_in_binary = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Release settings are owned by this repository rather than inherited from the
+# fleet workspace: released binaries must not depend on a
+# parent profile. Legal here because this manifest is its own workspace root.
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

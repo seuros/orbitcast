@@ -1,0 +1,68 @@
+{
+  "description": "The 202 body of POST /v1/publications on the private HTTP ingress. Deliberately minimal: the version every Orbitcast envelope carries plus the publication UUID the caller supplied. A 202 means the backend accepted (and, for retained streams, committed) the publication - never that a browser saw it. The Ruby publisher treats the status code as the contract and may ignore this body.",
+  "cases": [
+    {
+      "name": "accepted_publication",
+      "input": {
+        "wire": "{\"version\":1,\"publication_id\":\"3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "publication_id": "3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f"
+      }
+    },
+    {
+      "name": "ack_without_version_reads_as_v1",
+      "input": {
+        "wire": "{\"publication_id\":\"3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "publication_id": "3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f"
+      }
+    },
+    {
+      "name": "unknown_fields_are_ignored",
+      "input": {
+        "wire": "{\"version\":1,\"publication_id\":\"3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"accepted_at\":1760000000,\"future\":{\"a\":[1]}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "publication_id": "3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f"
+      }
+    },
+    {
+      "name": "missing_publication_id",
+      "input": {
+        "wire": "{\"version\":1}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_field"
+      }
+    },
+    {
+      "name": "publication_id_that_is_not_a_uuid",
+      "input": {
+        "wire": "{\"version\":1,\"publication_id\":\"42\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "invalid_uuid"
+      }
+    },
+    {
+      "name": "unsupported_version",
+      "input": {
+        "wire": "{\"version\":2,\"publication_id\":\"3f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unsupported_version"
+      }
+    }
+  ]
+}

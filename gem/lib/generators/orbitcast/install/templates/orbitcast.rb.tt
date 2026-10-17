@@ -1,0 +1,156 @@
+# frozen_string_literal: true
+
+# Orbitcast configuration.
+#
+# Precedence is CLI > ORBITCAST_* environment > this file / cable.yml >
+# defaults. `bundle exec orbitcast serve` boots Rails once, reads these values,
+# and exports an allowlisted ORBITCAST_* environment to the relay process.
+# Key material is exported as strict base64 (ORBITCAST_*_SECRET_BASE64) and
+# never as a command-line argument. RAILS_MASTER_KEY and SECRET_KEY_BASE are
+# never exported.
+#
+# namespace, database_url, and publish_via come from config/cable.yml.
+Orbitcast.configure do |config|
+  # The default mode. Signed streams are read capabilities issued by an
+  # authorized Rails request; the relay runs no application Ruby, so
+  # ApplicationCable::Connection#connect, channel #subscribed, and `perform`
+  # actions are NOT executed. See the :dispatch section below for the mode
+  # that does execute them.
+  config.mode = :signed
+
+  # Key for Orbitcast::StreamsChannel tokens (Orbitcast.signed_stream_name).
+  #
+  # Without an explicit key, the gem derives one from the application's key
+  # generator under the purpose "orbitcast/streams/v1/<namespace>" (32 bytes):
+  # stable across restarts, different per namespace, and never the master key
+  # or secret_key_base themselves. Set one explicitly to rotate independently
+  # of secret_key_base, or to share a key between deployments:
+  #
+  #   bin/rails credentials:edit
+  #   orbitcast:
+  #     streams_secret: <32+ random bytes, base64 or hex>
+  streams_secret =
+    Rails.application.credentials.dig(:orbitcast, :streams_secret) ||
+    ENV["ORBITCAST_STREAMS_SECRET"]
+  config.streams_secret = streams_secret if streams_secret.present?
+
+  # Key rotation: retired keys that still VERIFY (never sign) while old
+  # signed names expire. Same for Turbo keys (config.turbo_previous_secrets).
+  # config.streams_previous_secrets = [Rails.application.credentials.dig(:orbitcast, :previous_streams_secret)].compact
+
+  # Overflow relay for broadcasts above PostgreSQL's 8000-byte NOTIFY limit.
+  # Needs db/orbitcast_migrate/001_create_orbitcast_payloads.rb migrated on
+  # the cable database (bin/rails generate orbitcast:install --overflow).
+<% if overflow? -%>
+  config.overflow_enabled = true
+<% else -%>
+  # config.overflow_enabled = true
+<% end -%>
+
+  # --- Relay process ---------------------------------------------------------
+  #
+  # `bundle exec orbitcast serve` exports these to the relay. In development
+  # and test the listener defaults to 127.0.0.1:28080 (matching
+  # config.action_cable.url); production MUST set one here or through
+  # ORBITCAST_LISTEN_ADDR in the relay's environment.
+  # config.listen_addr = "0.0.0.0:28080"
+  # config.listener_database_url = ENV["ORBITCAST_LISTENER_DATABASE_URL"] # session-pooled DSN for LISTEN
+  # config.trusted_proxies = ["10.0.0.0/8"]   # CIDRs allowed to set forwarded headers
+  # config.outbound_queue_messages = 1024     # per-connection outbound ceilings
+  # config.outbound_queue_bytes = 4 * 1024 * 1024
+
+  # Optional tuning.
+  # config.connection = :pool       # or :active_record to join the app transaction
+  # config.pool_size = 5            # dedicated pg publisher connections
+  # config.pool_timeout = 5.0       # seconds to wait for one
+  # config.stream_expires_in = 3600 # default TTL of a signed stream name
+
+  # --- Rails-dispatch mode (opt-in) ----------------------------------------
+  #
+  # In :dispatch mode the relay still holds the socket, but it calls back into
+  # this application over a private HTTP endpoint for every decision:
+  # ApplicationCable::Connection#connect, channel #subscribed / #unsubscribed,
+  # and `perform` actions all run here, as ordinary Rails code. Channels
+  # inherit from Orbitcast::Channel (a real ActionCable::Channel::Base
+  # subclass) and record ordered effects instead of touching pubsub directly.
+  #
+  # Turn it on deliberately: it is a callback surface, and it is authenticated
+  # by a dedicated service credential. Without rpc_token, boot fails rather
+  # than exposing an open endpoint.
+  #
+  #   config.mode = :dispatch
+  #   config.rpc_token = Rails.application.credentials.dig(:orbitcast, :rpc_token)
+  #   config.rpc_endpoint_url = "https://app.internal/_orbitcast/v1/rails"
+  #   config.connection_class = "ApplicationCable::Connection"
+  #   # The channel allowlist. :auto derives it from app/channels; a list is
+  #   # explicit. A client-supplied channel name outside it is never
+  #   # constantized.
+  #   config.channels = :auto
+
+  # --- Recovery (opt-in) ---------------------------------------------------
+  #
+  # A recovery token lets one browser session replay retained history on the
+  # reserved Orbitcast::RecoveryChannel. It is a separate capability with a
+  # separate key: purpose "recover", never "subscribe", and there is no
+  # fallback to streams_secret in either direction. It also needs the relay
+  # running with the broker enabled and the orbitcast_broker migration
+  # installed; without both, nothing here does anything.
+  #
+  #   recovery_secret =
+  #     Rails.application.credentials.dig(:orbitcast, :recovery_secret) ||
+  #     ENV["ORBITCAST_RECOVERY_SECRET"]
+  #   config.recovery_secret = recovery_secret if recovery_secret.present?
+  #
+  # Mint one from the same authorization decision that produced the
+  # subscription, and keep the lifetime short:
+  #
+  #   Orbitcast.recovery_token(
+  #     session_id: "session:#{current_user.id}",
+  #     streams: [Room.find(params[:id]).to_gid_param],
+  #     expires_in: 900
+  #   )
+end
+
+# --- Presence (dispatch mode only) -----------------------------------------
+#
+# Presence needs no transport extension and no client patch: a stock
+# @rails/actioncable subscription speaks it. What it does need is a Rails
+# decision, because identity is never client-chosen — the browser sends an
+# operation and a page window, and nothing else.
+#
+# Grant it from a channel callback, where the application already knows who is
+# asking:
+#
+#   class RoomChannel < ApplicationCable::Channel
+#     def subscribed
+#       room = Room.find(params[:id])
+#       return reject unless current_user.can_read?(room)
+#
+#       stream_for room
+#       grant_presence broadcasting_for(room),
+#                      subject_id: "user:#{current_user.id}",
+#                      metadata: { name: current_user.name },  # public to the room
+#                      ttl: 45,                                # seconds
+#                      operations: %w[join leave snapshot]
+#     end
+#
+#     def kick(data)
+#       revoke_presence broadcasting_for(room), subject_id: "user:#{data["id"]}"
+#     end
+#   end
+#
+# `metadata` is broadcast to every member of the stream, so nothing private
+# belongs in it. A `subject_id` a client sends anyway is an unknown field on
+# the presence command and is ignored — the grant above is the only source.
+
+# Turbo's signed stream names use Turbo's own key, which Rails derives with the
+# key generator (NOT secret_key_base) inside an after_initialize hook. Reading
+# it any earlier raises, so export it from one too: the launcher base64-encodes
+# these exact bytes into ORBITCAST_TURBO_SECRET_BASE64.
+#
+# Remove this block if the application does not use turbo_stream_from.
+Rails.application.config.after_initialize do
+  Orbitcast.configure do |config|
+    config.turbo_secret = Turbo.signed_stream_verifier_key if defined?(Turbo)
+  end
+end

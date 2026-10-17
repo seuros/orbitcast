@@ -1,0 +1,47 @@
+{
+  "description": "Well-formed Orbitcast-profile signed stream tokens: base64(JSON(claims)) + \"--\" + hex(HMAC-SHA256(secret, encoded)). Signature and claims are both valid at input.now.",
+  "cases": [
+    {
+      "name": "valid_subscribe_token",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--ba7637287a948eea5865b506a7601ec94c8f08b7473dd80785d70f479db227b7",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        },
+        "stream": "chat:42"
+      }
+    },
+    {
+      "name": "valid_unicode_stream",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJzdHJlYW06w7xuw69jb2RlL/CfmoAiLCJwdXJwb3NlIjoic3Vic2NyaWJlIiwiZXhwaXJlc19hdCI6NDEwMjQ0NDgwMH0=--c0da609ff49b5681dceaa52839480bf6daa0b7bf189ebfe4c359e2e85d695718",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "stream:ünïcode/🚀",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        },
+        "stream": "stream:ünïcode/🚀"
+      }
+    }
+  ]
+}

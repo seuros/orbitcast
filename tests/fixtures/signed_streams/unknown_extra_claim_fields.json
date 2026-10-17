@@ -1,0 +1,26 @@
+{
+  "description": "Claims carrying unknown additive fields. Verifiers must ignore them (normal tolerant parsing) while still validating every known authorization-bearing claim. expect.claims lists only the known fields.",
+  "cases": [
+    {
+      "name": "extra_fields_tolerated",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDAsImlzc3VlZF9hdCI6MTc2MDAwMDAwMCwicmVnaW9uIjoiZXUtd2VzdC0xIn0=--8a888207e85cdf455bf894aacdba20ec19d1000d11c2d7130b3d1052062b9529",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        },
+        "stream": "chat:42"
+      }
+    }
+  ]
+}

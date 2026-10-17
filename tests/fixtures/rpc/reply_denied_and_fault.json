@@ -1,0 +1,107 @@
+{
+  "description": "Denial is a decision, not an error: Rust turns it into standard reject/disconnect framing. A fault is a Rails-side failure and closes the session with reconnect:true. Neither may carry effects, state, or identity - only an accepted operation changes state.",
+  "cases": [
+    {
+      "name": "identify_denied",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"denied\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":0,\"reason\":\"no signed-in user\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "denied",
+        "accepted": false,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 0,
+        "state": "unchanged",
+        "effects": [],
+        "reason": "no signed-in user",
+        "disconnect_frame": { "reason": "unauthorized", "reconnect": false }
+      }
+    },
+    {
+      "name": "open_channel_denied",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"denied\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":1}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "open_channel",
+        "outcome": "denied",
+        "accepted": false,
+        "request_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+        "sequence": 2,
+        "new_revision": 1,
+        "state": "unchanged",
+        "effects": [],
+        "client_frame": "reject_subscription"
+      }
+    },
+    {
+      "name": "fault_reply",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"fault\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":1,\"reason\":\"ActiveRecord::ConnectionTimeoutError\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "open_channel",
+        "outcome": "fault",
+        "accepted": false,
+        "request_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+        "sequence": 2,
+        "new_revision": 1,
+        "state": "unchanged",
+        "effects": [],
+        "reason": "ActiveRecord::ConnectionTimeoutError"
+      }
+    },
+    {
+      "name": "absent_outcome_defaults_to_fault",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "fault",
+        "accepted": false,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 1,
+        "state": "unchanged",
+        "effects": []
+      }
+    },
+    {
+      "name": "denied_reply_carrying_effects_is_rejected",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"denied\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":1,\"effects\":[{\"kind\":\"add_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"stream\":\"chat:42\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "not_allowed_for_outcome"
+      }
+    },
+    {
+      "name": "denied_reply_carrying_identity_is_rejected",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"denied\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":0,\"identity\":{\"identity_key\":\"user:7\"}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "not_allowed_for_outcome"
+      }
+    }
+  ]
+}

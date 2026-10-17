@@ -1,0 +1,95 @@
+{
+  "description": "Absent versus null versus empty state. Absent and explicit null both mean *unchanged*; a present empty object means *clear*. Ruby must emit absence, not `{}`, when it has nothing to change - and must emit `{}` when it really means clear.",
+  "cases": [
+    {
+      "name": "state_absent_means_unchanged",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 1,
+        "state": "unchanged",
+        "effects": []
+      }
+    },
+    {
+      "name": "state_null_means_unchanged",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1,\"state\":null,\"subscription_state\":null}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 1,
+        "state": "unchanged",
+        "subscription_state": "unchanged",
+        "effects": []
+      }
+    },
+    {
+      "name": "state_empty_object_means_clear",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":2,\"state\":{}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 2,
+        "state": "clear",
+        "state_value": {},
+        "effects": []
+      }
+    },
+    {
+      "name": "state_object_replaces_the_whole_map",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":3,\"state\":{\"cart_id\":19,\"flagged\":null}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 3,
+        "state": "replace",
+        "state_value": { "cart_id": 19, "flagged": null },
+        "effects": []
+      }
+    },
+    {
+      "name": "state_of_the_wrong_type_is_a_hard_error",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1,\"state\":[1,2]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "wrong_type"
+      }
+    }
+  ]
+}

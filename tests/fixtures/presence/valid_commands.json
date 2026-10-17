@@ -1,0 +1,83 @@
+{
+  "description": "Client presence operations, as they arrive inside the `data` field of an ordinary ActionCable `message`/`perform` command. The reserved action is `orbitcast_presence`; the only client-controlled values are the operation and the snapshot page window. An absent version reads as 1, an absent page window defaults to limit 50 / offset 0.",
+  "cases": [
+    {
+      "name": "join",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"join\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "join",
+        "page": { "limit": 50, "offset": 0 }
+      }
+    },
+    {
+      "name": "leave",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"leave\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "leave",
+        "page": { "limit": 50, "offset": 0 }
+      }
+    },
+    {
+      "name": "snapshot_with_defaults",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"snapshot\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "snapshot",
+        "page": { "limit": 50, "offset": 0 }
+      }
+    },
+    {
+      "name": "snapshot_with_an_explicit_page",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"snapshot\",\"limit\":100,\"offset\":200}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "snapshot",
+        "page": { "limit": 100, "offset": 200 }
+      }
+    },
+    {
+      "name": "command_from_an_older_peer_without_a_version",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"action\":\"orbitcast_presence\",\"op\":\"join\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "join",
+        "page": { "limit": 50, "offset": 0 }
+      }
+    },
+    {
+      "name": "command_from_a_newer_peer_with_extra_fields",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"leave\",\"reason\":\"tab_closed\",\"trace\":{\"span\":\"abc\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "leave",
+        "page": { "limit": 50, "offset": 0 }
+      }
+    }
+  ]
+}

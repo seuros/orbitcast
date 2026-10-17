@@ -1,0 +1,100 @@
+{
+  "description": "Rolling-deploy skew in both directions: a newer peer's extra fields are ignored, and an older peer's safe omissions are defaulted. An absent version reads as 1 (serializers still always emit it).",
+  "cases": [
+    {
+      "name": "reply_from_a_newer_peer_with_extra_fields",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"server_time\":1760000000,\"trace\":{\"span\":\"abc\"},\"effects\":[{\"kind\":\"add_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"stream\":\"chat:42\",\"priority\":\"high\"}]}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "open_channel",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+        "sequence": 2,
+        "new_revision": 2,
+        "state": "unchanged",
+        "effect_kinds": ["add_stream"],
+        "effects": [
+          {
+            "kind": "add_stream",
+            "identifier": "{\"channel\":\"ChatChannel\"}",
+            "stream": "chat:42"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reply_from_an_older_peer_without_a_version",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 1,
+        "state": "unchanged",
+        "effects": []
+      }
+    },
+    {
+      "name": "request_from_a_newer_peer_with_extra_fields",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1000,\"trace_id\":\"abc\",\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\",\"tls_version\":\"1.3\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "expected_revision": 0,
+        "deadline_ms": 1000,
+        "connection": {
+          "url": "/cable",
+          "origin": null,
+          "client_address": "203.0.113.7",
+          "headers": {}
+        }
+      }
+    },
+    {
+      "name": "request_from_an_older_peer_without_a_version",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1000,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "expected_revision": 0,
+        "deadline_ms": 1000,
+        "connection": {
+          "url": "/cable",
+          "origin": null,
+          "client_address": "203.0.113.7",
+          "headers": {}
+        }
+      }
+    }
+  ]
+}

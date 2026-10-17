@@ -1,0 +1,97 @@
+{
+  "description": "Server-to-client presence refusals. A refused `orbitcast_presence` operation is answered on the same subscription with an `error` message: `reason` is the stable refusal code (`PresenceError::code` in src/presence.rs), `op` names the operation when the command decoded far enough to carry one, and `stream` names the roster when exactly one was addressed. A refusal never closes the connection. The envelope is tagged `error` rather than `message` because only the browser ever receives it: Rails neither produces nor decodes refusals, so the Ruby suite does not read these cases.",
+  "cases": [
+    {
+      "name": "not_granted_names_the_operation_but_no_roster",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"reason\":\"not_granted\",\"op\":\"join\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "error",
+        "stream": "",
+        "total": 0,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "operation_not_allowed_names_the_roster_it_was_asked_about",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"stream\":\"chat:42\",\"reason\":\"operation_not_allowed\",\"op\":\"snapshot\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "error",
+        "stream": "chat:42",
+        "total": 0,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "invalid_command_knows_neither_roster_nor_operation",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"reason\":\"invalid_command\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "error",
+        "stream": "",
+        "total": 0,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "unavailable_from_an_older_peer_without_a_version",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"type\":\"presence\",\"event\":\"error\",\"reason\":\"unavailable\",\"op\":\"join\",\"stream\":\"chat:42\",\"node_id\":\"node-7\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "error",
+        "stream": "chat:42",
+        "total": 0,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "error_without_a_reason",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"op\":\"join\"}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_field" }
+    },
+    {
+      "name": "error_with_a_reason_longer_than_the_code_bound",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"reason\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+      },
+      "expect": { "valid": false, "error_kind": "field_too_long" }
+    },
+    {
+      "name": "error_carrying_a_roster",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"stream\":\"chat:42\",\"reason\":\"backend\",\"members\":[{\"subject_id\":\"user:1\"}]}"
+      },
+      "expect": { "valid": false, "error_kind": "not_allowed_for_outcome" }
+    },
+    {
+      "name": "error_with_an_unknown_op",
+      "envelope": "error",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"error\",\"reason\":\"not_granted\",\"op\":\"lurk\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unknown_op" }
+    }
+  ]
+}

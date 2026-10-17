@@ -1,6 +1,12 @@
 # Rust
 /target/
-Cargo.lock
+
+# The benchmark harness is its own crate with its own build directory; its
+# Cargo.lock *is* committed, so a bench run is reproducible.
+/bench/target/
+
+# Native gem packaging output (tasks/native.rake)
+/pkg/
 
 # IDE
 .idea/
@@ -19,3 +25,12 @@ Thumbs.db
 
 # Dictator cache
 .dictator/
+
+# Gem test scratch: generator destination root and dummy-app runtime dirs
+/gem/tmp/
+/gem/test/dummy/log/*
+!/gem/test/dummy/log/.keep
+/gem/test/dummy/tmp/*
+!/gem/test/dummy/tmp/.keep
+/gem/test/dummy/storage/*
+!/gem/test/dummy/storage/.keep

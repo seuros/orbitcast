@@ -1,1086 +1,354 @@
-//! OrbitCast - Real-time WebSocket server
+//! OrbitCast CLI/bootstrap.
 //!
-//! Runs as a ship under Mothership, communicating via Unix socket
-//! using the Docking Protocol.
+//! Everything of substance lives in the `orbitcast` library; this binary only
+//! parses arguments, loads and validates configuration, starts the selected
+//! transports, and runs the shutdown sequence.
+//!
+//! # Transports
+//!
+//! - **Docking**: selected by the `MS_*` supervisor environment. OrbitCast
+//!   binds its ship socket and waits for Mothership to dock.
+//! - **HTTP/WebSocket**: selected by `ORBITCAST_LISTEN_ADDR`. The listener is
+//!   bound before startup completes, so a port conflict is a startup failure.
+//!
+//! Both may run at once; at least one is required.
+//!
+//! # Subcommands
+//!
+//! - `serve` (the default): run the relay.
+//! - `doctor [--json]`: describe the build and configuration and probe the
+//!   database, without binding anything ([`orbitcast::doctor`]). Exits `0`
+//!   whatever it finds — it diagnoses, it does not gate — except `2` when the
+//!   configuration cannot be parsed at all.
+//!
+//! # Shutdown
+//!
+//! On SIGTERM or ctrl-c: stop accepting, advertise the standard ActionCable
+//! `disconnect {reconnect: true}`, drain sessions until `shutdown_timeout`,
+//! tear every remaining session down through the one teardown path, and stop
+//! the pub/sub backend.
+//!
+//! # Metrics
+//!
+//! `GET /metrics` is served by the **private ingress listener** when one is
+//! configured, behind the same bearer credential as the publication routes.
+//! `metrics_public` additionally mounts it, unauthenticated, on the public
+//! listener. With neither, the process exports nothing - fail closed. The
+//! resolved choice is logged once at startup; see [`orbitcast::metrics`].
 
-// Compile-time feature validation: at least one pub/sub backend required.
-#[cfg(not(any(feature = "postgres", feature = "memory")))]
-compile_error!(
-    "OrbitCast requires a pub/sub backend. Enable: --features postgres OR --features memory"
-);
-mod actioncable;
-mod config;
-mod hub;
-mod presence;
-mod protocol;
-mod pubsub;
-mod rpc;
-mod rpc_client;
-mod session;
-mod streams;
-
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use clap::Parser;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use orbitcast::config::{Config, ConfigError};
+use orbitcast::doctor::Report;
+use orbitcast::server::{Backend, Shutdown};
+use orbitcast::transport::{docking, http, ingress};
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
-use crate::{
-    actioncable::{ClientCommand, ServerMessage},
-    config::Config,
-    hub::Hub,
-    presence::{PresenceStore, broadcast_presence_event},
-    protocol::{CargoKind, MessageType, Moored, Outgoing},
-    pubsub::PubSub,
-    rpc::anycable::{CommandMessage, Env, Status},
-    rpc_client::AnyCableRpc,
-    session::Session,
-    streams::StreamsController,
-};
-
-#[cfg(all(not(feature = "memory"), feature = "postgres"))]
-use crate::pubsub::PostgresPubSub;
-
-#[cfg(feature = "memory")]
-use crate::pubsub::MemoryPubSub;
-
-#[cfg(all(not(feature = "memory"), feature = "postgres"))]
-type PubSubImpl = PostgresPubSub;
-#[cfg(feature = "memory")]
-type PubSubImpl = MemoryPubSub;
-
-#[derive(Parser, Debug)]
-#[command(name = "orbitcast")]
-#[command(about = "Real-time WebSocket server with ActionCable protocol")]
-#[command(version)]
+#[derive(usage_rs::Cli, Debug)]
+#[usage(name = "orbitcast")]
+#[usage(about = "Real-time WebSocket server with ActionCable protocol")]
+#[usage(version)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 struct Args {
     /// Log level (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info")]
+    ///
+    /// Precedence: this flag > `ORBITCAST_LOG` > `info`.
+    #[usage(short, long, global, env = "ORBITCAST_LOG", default = "info")]
     log_level: String,
+    /// Optional subcommand; a bare `orbitcast` behaves exactly like
+    /// `orbitcast serve` (backward compatible with supervisor manifests that
+    /// launch the binary with no arguments).
+    #[usage(subcommand)]
+    command: Option<Command>,
 }
 
-async fn init_pubsub(config: &Config) -> Option<Arc<PubSubImpl>> {
-    #[cfg(feature = "memory")]
-    {
-        let _ = config;
-        info!("Memory pub/sub initialized (single-node only)");
-        Some(Arc::new(MemoryPubSub::new()))
-    }
-
-    #[cfg(all(not(feature = "memory"), feature = "postgres"))]
-    {
-        if let Some(ref db_url) = config.database_url {
-            match PostgresPubSub::new(db_url).await {
-                Ok(ps) => {
-                    info!("PostgreSQL pub/sub connected");
-                    Some(Arc::new(ps))
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to connect to PostgreSQL pub/sub");
-                    None
-                }
-            }
-        } else {
-            warn!("No database_url in config - pub/sub disabled");
-            None
-        }
-    }
-
-    #[cfg(all(not(feature = "memory"), not(feature = "postgres")))]
-    {
-        let _ = config;
-        None
-    }
+#[derive(usage_rs::Subcommands, Debug)]
+enum Command {
+    /// Run the relay (default when no subcommand is given)
+    Serve,
+    /// Report build, configuration, and database reachability; never serves
+    Doctor(DoctorArgs),
 }
 
-fn filter_headers(
-    headers: &HashMap<String, String>,
-    allowlist: &[String],
-) -> HashMap<String, String> {
-    if allowlist.is_empty() {
-        return headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
-    }
-
-    let allowed: std::collections::HashSet<String> =
-        allowlist.iter().map(|h| h.to_lowercase()).collect();
-
-    headers
-        .iter()
-        .filter(|(k, _)| allowed.contains(&k.to_lowercase()))
-        .map(|(k, v)| (k.to_lowercase(), v.clone()))
-        .collect()
+#[derive(usage_rs::Args, Debug)]
+struct DoctorArgs {
+    /// Print one JSON object instead of text
+    #[usage(long)]
+    json: bool,
 }
 
-fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
-    let name_lower = name.to_lowercase();
-    headers.iter().find(|(k, _)| k.to_lowercase() == name_lower).map(|(_, v)| v.as_str())
-}
-
-fn build_request_url(path: &str, headers: &HashMap<String, String>) -> String {
-    if path.starts_with("http://") || path.starts_with("https://") {
-        return path.to_string();
-    }
-
-    let scheme = header_value(headers, "x-forwarded-proto")
-        .or_else(|| header_value(headers, "x-forwarded-scheme"))
-        .unwrap_or("http");
-
-    let host = header_value(headers, "x-forwarded-host")
-        .or_else(|| header_value(headers, "host"))
-        .unwrap_or("localhost");
-
-    format!("{}://{}{}", scheme, host, path)
-}
-
-fn build_env(
-    path: &str,
-    headers: &HashMap<String, String>,
-    allowlist: &[String],
-    cstate: HashMap<String, String>,
-    istate: HashMap<String, String>,
-) -> Env {
-    Env {
-        url: build_request_url(path, headers),
-        headers: filter_headers(headers, allowlist),
-        cstate,
-        istate,
-    }
-}
-
-fn status_from(code: i32) -> Status {
-    Status::try_from(code).unwrap_or(Status::Error)
-}
-
-async fn send_transmissions(hub: &Hub, conn_id: u32, transmissions: Vec<String>) {
-    for payload in transmissions {
-        hub.send(conn_id, payload.as_bytes()).await;
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SessionSnapshot {
-    path: String,
-    headers: HashMap<String, String>,
-    subscriptions: Vec<String>,
-    cstate: HashMap<String, String>,
-    istate: HashMap<String, String>,
-    identifiers: String,
-}
-
-fn snapshot_session(hub: &Hub, conn_id: u32) -> Option<SessionSnapshot> {
-    let session = hub.get_session(conn_id)?;
-    Some(SessionSnapshot {
-        path: session.path.clone(),
-        headers: session.headers.clone(),
-        subscriptions: session.subscriptions.iter().cloned().collect(),
-        cstate: session.cstate.clone(),
-        istate: session.istate_encoded(),
-        identifiers: session.connection_identifiers.clone().unwrap_or_default(),
-    })
-}
-
-async fn rpc_disconnect(rpc: &AnyCableRpc, hub: &Hub, conn_id: u32, config: &Config) {
-    let snapshot = match snapshot_session(hub, conn_id) {
-        Some(snapshot) => snapshot,
-        None => return,
-    };
-
-    let env = build_env(
-        &snapshot.path,
-        &snapshot.headers,
-        &config.rpc_headers,
-        snapshot.cstate,
-        snapshot.istate,
-    );
-
-    let request = crate::rpc::anycable::DisconnectRequest {
-        identifiers: snapshot.identifiers,
-        subscriptions: snapshot.subscriptions,
-        env: Some(env),
-    };
-
-    match rpc.disconnect(request).await {
-        Ok(response) => {
-            let status = status_from(response.status);
-            if status != Status::Success {
-                warn!(
-                    status = ?status,
-                    error = %response.error_msg,
-                    "RPC disconnect returned non-success"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "RPC disconnect failed");
-        }
-    }
-}
-
-async fn close_connection(
-    rpc: &AnyCableRpc,
-    hub: &Hub,
-    conn_id: u32,
-    code: u16,
-    reason: &str,
-    config: &Config,
-) {
-    rpc_disconnect(rpc, hub, conn_id, config).await;
-    hub.disconnect(conn_id, code, reason).await;
-    hub.remove_session(conn_id);
-}
-
-/// Run an AnyCable `command` RPC (subscribe/unsubscribe/message) for a session.
-///
-/// Builds the env from the current session, dispatches the RPC, flushes any
-/// transmissions, and applies disconnect/error handling. Returns the response
-/// and decoded status when the caller should continue processing; returns
-/// `None` (after logging / closing as appropriate) when the caller should skip
-/// this command.
-async fn exchange_command(
-    rpc: &AnyCableRpc,
-    hub: &Hub,
-    config: &Config,
-    conn_id: u32,
-    command: &str,
-    identifier: &str,
-    data: String,
-) -> Option<(crate::rpc::anycable::CommandResponse, Status)> {
-    let (path, headers, cstate, istate, connection_identifiers) = match hub.get_session(conn_id) {
-        Some(session) => (
-            session.path.clone(),
-            session.headers.clone(),
-            session.cstate.clone(),
-            session.istate_for(identifier),
-            session.connection_identifiers.clone().unwrap_or_default(),
-        ),
-        None => {
-            warn!(conn_id, "Received command for unknown session");
-            return None;
-        }
-    };
-
-    let env = build_env(&path, &headers, &config.rpc_headers, cstate, istate);
-
-    let message = CommandMessage {
-        command: command.to_string(),
-        identifier: identifier.to_string(),
-        connection_identifiers,
-        data,
-        env: Some(env),
-    };
-
-    let mut response = match rpc.command(message).await {
-        Ok(response) => response,
-        Err(e) => {
-            error!(conn_id, error = %e, "RPC command failed");
-            close_connection(rpc, hub, conn_id, 1011, "rpc_command_failed", config).await;
-            return None;
-        }
-    };
-
-    let status = status_from(response.status);
-    send_transmissions(hub, conn_id, std::mem::take(&mut response.transmissions)).await;
-
-    if response.disconnect || status == Status::Error {
-        let reason = if response.error_msg.is_empty() {
-            "rpc_disconnect"
-        } else {
-            response.error_msg.as_str()
-        };
-        close_connection(rpc, hub, conn_id, 1000, reason, config).await;
-        return None;
-    }
-
-    Some((response, status))
-}
-
-/// Apply stream membership changes from an RPC response, keeping the local hub
-/// subscriptions and the pub/sub backend in sync.
-async fn apply_stream_changes(
-    hub: &Hub,
-    pubsub: &Option<Arc<PubSubImpl>>,
-    conn_id: u32,
-    added_streams: Vec<String>,
-    removed_streams: Vec<String>,
-) {
-    for stream in added_streams {
-        hub.subscribe_to_stream(conn_id, &stream);
-        if let Some(ps) = pubsub
-            && hub.stream_subscriber_count(&stream) == 1
-            && let Err(e) = ps.subscribe(&stream).await
-        {
-            warn!(stream = %stream, error = %e, "Failed to subscribe pubsub");
-        }
-    }
-
-    for stream in removed_streams {
-        hub.unsubscribe_from_stream(conn_id, &stream);
-        if hub.stream_subscriber_count(&stream) == 0
-            && let Some(ps) = pubsub
-            && let Err(e) = ps.unsubscribe(&stream).await
-        {
-            warn!(stream = %stream, error = %e, "Failed to unsubscribe pubsub");
-        }
-    }
-}
-
-/// Resolve the presence stream tracked for `identifier` on a session.
-///
-/// Returns `None` (after logging) when the session is unknown or has no
-/// presence stream for the subscription, so the caller can skip the command.
-fn resolve_presence_stream(hub: &Hub, conn_id: u32, identifier: &str) -> Option<String> {
-    let Some(session) = hub.get_session(conn_id) else {
-        warn!(conn_id, "Received presence command for unknown session");
-        return None;
-    };
-    let Some(pstream) = session.get_presence_stream(identifier) else {
-        warn!(conn_id, identifier, "No presence stream for subscription");
-        return None;
-    };
-    Some(pstream.to_string())
-}
-
-/// Perform docking handshake with Mothership
-async fn dock<S: AsyncReadExt + AsyncWriteExt + Unpin>(
-    stream: &mut S,
-    ship_name: &str,
-) -> anyhow::Result<Moored> {
-    // Send DOCK message
-    let dock = protocol::Dock { version: protocol::VERSION, ship: ship_name.to_string() };
-    let encoded = protocol::encode_dock(&dock);
-    stream.write_all(&encoded).await?;
-    info!(version = protocol::VERSION, ship = %ship_name, "Sent DOCK");
-
-    // Read MOORED response
-    let mut buf = vec![0u8; 4096];
-    let mut pending = Vec::new();
-
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            anyhow::bail!("Connection closed during docking");
-        }
-        pending.extend_from_slice(&buf[..n]);
-
-        if pending.len() >= 5 {
-            let (msg_type, payload_len) = protocol::decode_header(&pending)?;
-            let total_len = 5 + payload_len;
-
-            if pending.len() >= total_len {
-                if msg_type != MessageType::Moored {
-                    anyhow::bail!("Expected MOORED, got {:?}", msg_type);
-                }
-
-                let payload = &pending[5..total_len];
-                let moored: Moored = serde_json::from_slice(payload)?;
-
-                info!(
-                    version = moored.version,
-                    config_keys = ?moored.config.keys().collect::<Vec<_>>(),
-                    "Docking complete - MOORED"
-                );
-                return Ok(moored);
-            }
-        }
-    }
-}
+/// Exit status of `doctor` when the configuration cannot be parsed.
+const EXIT_CONFIG_PARSE: i32 = 2;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // `serve` is byte-for-byte the default run. The exhaustive match keeps a
+    // future subcommand from silently falling through into serving.
+    match args.command {
+        None | Some(Command::Serve) => {}
+        Some(Command::Doctor(DoctorArgs { json })) => std::process::exit(doctor(json).await),
+    }
 
     // Initialize JSON logging (consistent with Mothership)
     tracing_subscriber::fmt().json().with_env_filter(&args.log_level).init();
 
     info!("OrbitCast v{}", env!("CARGO_PKG_VERSION"));
 
-    // Load config from environment
-    let mut config = match Config::from_env() {
+    let config = match load_config() {
         Ok(config) => config,
         Err(e) => {
-            error!("Failed to load config: {}", e);
-            error!("OrbitCast must be run as a Mothership ship");
-            error!("Required env vars: MS_PID, MS_SHIP, MS_SOCKET_DIR");
+            error!(error = %e, "Failed to load config");
             std::process::exit(1);
         }
     };
 
-    info!(
-        pid = config.mothership_pid,
-        ship = %config.ship_name,
-        socket = %config.socket_path().display(),
-        "Starting OrbitCast"
-    );
+    serve(&config).await
+}
 
-    // Create socket directory if needed
-    if let Some(parent) = config.socket_path().parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+/// Run every configured transport until a shutdown signal, then drain.
+async fn serve(config: &Config) -> anyhow::Result<()> {
+    let shutdown = Shutdown::new();
+    Running::start(config, &shutdown)
+        .await?
+        .run_until_signal(&shutdown, config.shutdown_timeout)
+        .await;
+    info!("OrbitCast stopped");
+    Ok(())
+}
 
-    // Remove stale socket if exists
-    let socket_path = config.socket_path();
-    if socket_path.exists() {
-        tokio::fs::remove_file(&socket_path).await?;
-    }
+/// Everything [`serve`] started, stopped in reverse by
+/// [`Running::run_until_signal`].
+struct Running {
+    /// This process' own backend handle, released last: after every transport
+    /// has stopped and the pub/sub listener was aborted.
+    _backend: Arc<Backend>,
+    /// The pub/sub delivery listener, if the backend has one.
+    listener_task: Option<JoinHandle<()>>,
+    /// The direct listener, which has a drain phase of its own.
+    http: Option<Arc<http::HttpTransport>>,
+    /// One task per transport.
+    transports: Vec<JoinHandle<()>>,
+}
 
-    // Create Unix socket listener
-    let listener = UnixListener::bind(&socket_path)?;
-    info!(socket = %socket_path.display(), "Listening for Mothership connection");
+impl Running {
+    /// Initialize the backend, bind every configured listener, and spawn the
+    /// transports.
+    async fn start(config: &Config, shutdown: &Shutdown) -> anyhow::Result<Self> {
+        // A backend that cannot be established is a startup failure: the
+        // process exits non-zero rather than running with broadcasting off.
+        let backend = match Backend::init(config).await {
+            Ok(backend) => backend,
+            Err(error) => {
+                error!(error = %error, "Pub/sub backend failed to start; exiting");
+                return Err(error);
+            }
+        };
+        let listener_task = backend.spawn_listener();
 
-    // Accept connection from Mothership
-    let (mut stream, _) = listener.accept().await?;
-    info!("Mothership connected");
+        // Bind before anything else can succeed: a port conflict is a startup
+        // failure, not a background surprise.
+        let http_listener = match config.http.listen_addr {
+            Some(ref addr) => Some(http::bind(addr).await?),
+            None => None,
+        };
 
-    // Perform docking handshake
-    let moored = dock(&mut stream, &config.ship_name).await?;
+        // The private ingress binds its own listener (never the public /cable
+        // one); absent configuration means the ingress simply does not exist.
+        let ingress_listener = match config.ingress.listen_addr {
+            Some(ref addr) => Some(http::bind(addr).await?),
+            None => None,
+        };
 
-    // Apply config from Mothership
-    config.apply_moored_config(&moored.config);
+        let mut transports = Vec::new();
+        let mut http_transport = None;
 
-    let rpc_timeout = config.rpc_request_timeout_ms.map(Duration::from_millis);
-    let rpc = Arc::new(AnyCableRpc::connect(&config.rpc_host, rpc_timeout).await?);
-    info!(rpc_host = %config.rpc_host, "AnyCable RPC client ready");
+        if let Some(listener) = http_listener {
+            if !config.streams.is_enabled() && !config.rpc.is_enabled() {
+                anyhow::bail!(
+                    "the direct listener requires an authorization mode; configure Rails \
+                     dispatch (ORBITCAST_RPC_ENDPOINT_URL + ORBITCAST_RPC_TOKEN_BASE64) or \
+                     signed streams (ORBITCAST_STREAMS_SECRET_BASE64, ORBITCAST_TURBO_STREAMS + \
+                     ORBITCAST_TURBO_SECRET_BASE64, ORBITCAST_PUBLIC_STREAMS)"
+                );
+            }
 
-    // Initialize pub/sub backend
-    let pubsub = init_pubsub(&config).await;
+            let transport =
+                http::HttpTransport::new(Arc::clone(&backend), config, shutdown.clone())?;
+            http_transport = Some(Arc::clone(&transport));
+            transports.push(tokio::spawn(transport.serve(listener)));
+        }
 
-    // Now split stream for bidirectional communication
-    let (mut reader, mut writer) = stream.into_split();
+        if let Some(listener) = ingress_listener {
+            let transport =
+                ingress::IngressTransport::new(Arc::clone(&backend), config, shutdown.clone())?;
+            transports.push(tokio::spawn(transport.serve(listener)));
+        }
 
-    // Channel for outgoing cargo
-    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<Outgoing>(1024);
+        log_metrics_exposure(config);
 
-    // Create hub
-    let hub = Arc::new(Hub::new(outgoing_tx));
-
-    // Initialize presence store
-    let presence_ttl = 15; // TODO: make configurable
-    let presence = Arc::new(PresenceStore::new(presence_ttl));
-
-    // Spawn presence expiration task
-    {
-        let presence_clone = presence.clone();
-        let hub_clone = hub.clone();
-        tokio::spawn(async move {
-            presence::spawn_expiration_task(
-                presence_clone,
-                hub_clone,
-                Duration::from_secs(5), // Check every 5 seconds
+        if let Some(ref docking_config) = config.docking {
+            info!(
+                pid = docking_config.mothership_pid,
+                ship = %docking_config.ship_name,
+                socket = %docking_config.socket_path().display(),
+                "Starting OrbitCast docking transport"
             );
-        });
+
+            let config = config.clone();
+            let backend = Arc::clone(&backend);
+            let shutdown = shutdown.clone();
+            transports.push(tokio::spawn(async move {
+                if let Err(e) = docking::serve(config, backend, shutdown.clone()).await {
+                    error!(error = %e, "Docking transport failed");
+                    // A fatal docking error takes the process down so the
+                    // supervisor can relaunch the bay with a clean slate.
+                    shutdown.trigger();
+                }
+            }));
+        }
+
+        Ok(Self { _backend: backend, listener_task, http: http_transport, transports })
     }
 
-    // Initialize signed streams controller (for $pubsub, Turbo, CableReady)
-    let streams_controller = if config.streams.is_enabled() {
-        info!(
-            public = config.streams.public,
-            turbo = config.streams.turbo,
-            cable_ready = config.streams.cable_ready,
-            "Signed streams enabled"
-        );
-        Some(Arc::new(StreamsController::new(config.streams.clone())))
-    } else {
-        None
+    /// Serve until SIGTERM or ctrl-c, then drain: advertise the shutdown,
+    /// drain the direct listener, give every transport `timeout` to finish,
+    /// and stop the pub/sub listener.
+    async fn run_until_signal(self, shutdown: &Shutdown, timeout: Duration) {
+        wait_for_signal().await;
+        info!("Shutdown signal received; draining");
+        shutdown.trigger();
+
+        if let Some(transport) = self.http {
+            transport.drain(timeout).await;
+        }
+
+        for task in self.transports {
+            match tokio::time::timeout(timeout, task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(error = %e, "Transport task ended abnormally"),
+                Err(_) => warn!("Transport task did not stop within the drain deadline"),
+            }
+        }
+
+        if let Some(handle) = self.listener_task {
+            handle.abort();
+        }
+    }
+}
+
+/// Say once where `/metrics` ended up.
+///
+/// A node with neither the private ingress nor `metrics_public` exports
+/// nothing at all, which is the fail-closed default and worth stating rather
+/// than leaving an operator to discover by scraping a 404.
+fn log_metrics_exposure(config: &Config) {
+    match (config.ingress.is_enabled(), config.http.metrics_public) {
+        (true, false) => info!("Metrics: GET /metrics on the private ingress listener (bearer)"),
+        (true, true) => {
+            info!(
+                "Metrics: GET /metrics on the private ingress listener (bearer) and, \
+                 unauthenticated, on the public listener"
+            );
+        }
+        (false, true) => {
+            info!("Metrics: GET /metrics on the public listener, unauthenticated (metrics_public)");
+        }
+        (false, false) => info!(
+            "Metrics: not exported; configure ORBITCAST_INGRESS_LISTEN_ADDR (recommended) or \
+             ORBITCAST_METRICS_PUBLIC"
+        ),
+    }
+}
+
+/// `orbitcast doctor`: print the report and return the exit status.
+///
+/// No logging is initialized, so stdout carries nothing but the report. A
+/// configuration that does not parse is the one failure: it is reported (as
+/// JSON too, under `--json`) with [`EXIT_CONFIG_PARSE`].
+async fn doctor(json: bool) -> i32 {
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            if json {
+                let report = serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "target": orbitcast::doctor::TARGET,
+                    "features": orbitcast::doctor::features(),
+                    "envelope_versions": orbitcast::doctor::ENVELOPE_VERSIONS,
+                    "config_error": error.to_string(),
+                });
+                println!("{report}");
+            }
+            eprintln!("orbitcast doctor: configuration cannot be parsed: {error}");
+            return EXIT_CONFIG_PARSE;
+        }
     };
 
-    // Spawn pub/sub listener if available
-    if let Some(ref ps) = pubsub {
-        let ps_clone = ps.clone();
-        let hub_clone = hub.clone();
-        tokio::spawn(async move {
-            info!("Starting pub/sub listener");
-            if let Err(e) = ps_clone
-                .listen(move |stream, payload| {
-                    let hub = hub_clone.clone();
-                    // Wrap in message format and broadcast
-                    if let Ok(message) = serde_json::from_slice::<serde_json::Value>(&payload) {
-                        let broadcast =
-                            ServerMessage::Message { identifier: stream.clone(), message };
-                        let encoded = actioncable::encode(&broadcast);
-                        // O(1) broadcast via tokio::sync::broadcast
-                        hub.broadcast(&stream, &encoded);
-                    }
-                })
-                .await
-            {
-                error!(error = %e, "Pub/sub listener error");
-            }
-        });
+    let report = Report::gather(&config).await;
+    if json {
+        println!("{}", report.render_json());
+    } else {
+        print!("{}", report.render_text());
+    }
+    0
+}
+
+/// Load and validate configuration, explaining what a missing transport means.
+fn load_config() -> Result<Config, ConfigError> {
+    let config = Config::from_env()?;
+
+    if let Err(e) = config.validate() {
+        if matches!(e, ConfigError::NoTransport) {
+            error!(
+                "OrbitCast needs a transport: set ORBITCAST_LISTEN_ADDR (e.g. 127.0.0.1:8080) \
+                 to serve WebSockets directly, or run it as a Mothership ship (MS_PID, MS_SHIP, \
+                 MS_SOCKET_DIR)"
+            );
+        }
+        return Err(e);
     }
 
-    // Spawn ping task
-    let ping_hub = hub.clone();
-    let ping_interval = config.ping_interval;
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(ping_interval));
-        loop {
-            interval.tick().await;
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-            let ping = ServerMessage::Ping { timestamp };
-            let payload = actioncable::encode(&ping);
+    Ok(config)
+}
 
-            // O(1) broadcast ping to all sessions
-            ping_hub.broadcast_ping(&payload);
-            debug!(timestamp, sessions = ping_hub.session_count(), "Ping sent");
-        }
-    });
+/// Resolve on SIGTERM or ctrl-c.
+async fn wait_for_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
 
-    // Spawn outgoing cargo sender
-    let writer_handle = tokio::spawn(async move {
-        while let Some(message) = outgoing_rx.recv().await {
-            let encoded = protocol::encode_outgoing(&message);
-
-            if let Err(e) = writer.write_all(&encoded).await {
-                error!(error = %e, "Failed to write to Mothership");
-                break;
-            }
-        }
-    });
-
-    // Read messages from Mothership
-    let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer
-    let mut pending = Vec::new();
-
-    loop {
-        let n = match reader.read(&mut buf).await {
-            Ok(0) => {
-                info!("Mothership disconnected");
-                break;
-            }
-            Ok(n) => n,
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
             Err(e) => {
-                error!(error = %e, "Read error");
-                break;
+                warn!(error = %e, "Cannot listen for SIGTERM; ctrl-c only");
+                ctrl_c().await;
+                return;
             }
         };
 
-        pending.extend_from_slice(&buf[..n]);
-
-        // Process complete messages
-        while pending.len() >= 5 {
-            let (msg_type, payload_len) = match protocol::decode_header(&pending) {
-                Ok(header) => header,
-                Err(e) => {
-                    error!(error = %e, "Failed to decode header; dropping pending buffer");
-                    pending.clear();
-                    break;
-                }
-            };
-
-            let total_len = 5 + payload_len;
-            if pending.len() < total_len {
-                break; // Need more data
-            }
-
-            let payload = pending[5..total_len].to_vec();
-            pending.drain(..total_len);
-
-            match msg_type {
-                MessageType::Boarding => {
-                    let boarding: protocol::Boarding = serde_json::from_slice(&payload)?;
-                    debug!(
-                        conn_id = boarding.conn_id,
-                        path = %boarding.path,
-                        remote = %boarding.remote_addr,
-                        "New connection boarding"
-                    );
-
-                    let conn_id = boarding.conn_id;
-                    let env = build_env(
-                        &boarding.path,
-                        &boarding.headers,
-                        &config.rpc_headers,
-                        HashMap::new(),
-                        HashMap::new(),
-                    );
-                    let request = crate::rpc::anycable::ConnectionRequest { env: Some(env) };
-
-                    let response = match rpc.connect_request(request).await {
-                        Ok(response) => response,
-                        Err(e) => {
-                            error!(conn_id, error = %e, "RPC connect failed");
-                            hub.disconnect(conn_id, 1011, "rpc_connect_failed").await;
-                            continue;
-                        }
-                    };
-
-                    let status = status_from(response.status);
-                    if status != Status::Success {
-                        let reason = if response.error_msg.is_empty() {
-                            "rpc_rejected"
-                        } else {
-                            response.error_msg.as_str()
-                        };
-                        warn!(conn_id, status = ?status, reason, "RPC connect rejected");
-                        hub.disconnect(conn_id, 1000, reason).await;
-                        continue;
-                    }
-
-                    let mut session = Session::new(
-                        boarding.conn_id,
-                        boarding.path,
-                        boarding.remote_addr,
-                        boarding.headers,
-                    );
-                    if !response.identifiers.is_empty() {
-                        session.set_connection_identifiers(response.identifiers.clone());
-                    }
-                    if let Some(env) = response.env {
-                        session.set_cstate(env.cstate);
-                    }
-                    hub.add_session(session);
-
-                    send_transmissions(&hub, conn_id, response.transmissions).await;
-                    debug!(conn_id, "Connect transmissions sent");
-                }
-
-                MessageType::Cargo => {
-                    let cargo = protocol::decode_cargo(&payload)?;
-                    let conn_id = cargo.conn_id;
-                    debug!(
-                        conn_id,
-                        kind = ?cargo.kind,
-                        len = cargo.data.len(),
-                        "Received cargo"
-                    );
-
-                    if cargo.kind != CargoKind::Text {
-                        debug!(
-                            conn_id,
-                            kind = ?cargo.kind,
-                            len = cargo.data.len(),
-                            "Ignoring non-text ActionCable cargo"
-                        );
-                        continue;
-                    }
-
-                    if cargo.data.iter().all(|byte| byte.is_ascii_whitespace()) {
-                        debug!(conn_id, "Ignoring empty ActionCable text frame");
-                        continue;
-                    }
-
-                    let parsed = match actioncable::parse_command(&cargo.data) {
-                        Ok(command) => command,
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "Invalid ActionCable command");
-                            continue;
-                        }
-                    };
-
-                    match parsed {
-                        ClientCommand::Subscribe { identifier } => {
-                            // Check if this is a signed stream subscription (handled locally)
-                            if let Some(ref controller) = streams_controller
-                                && controller.handles(&identifier)
-                            {
-                                match controller.resolve(&identifier) {
-                                    Ok(result) => {
-                                        debug!(
-                                            conn_id,
-                                            stream = %result.stream,
-                                            "Signed stream subscription"
-                                        );
-
-                                        // Send confirmation
-                                        let confirm = ServerMessage::ConfirmSubscription {
-                                            identifier: identifier.clone(),
-                                        };
-                                        hub.send(conn_id, &actioncable::encode(&confirm)).await;
-
-                                        // Subscribe to the stream
-                                        if let Some(mut session) = hub.get_session_mut(conn_id) {
-                                            session.subscribe(identifier.clone());
-                                            session.add_subscription_streams(
-                                                &identifier,
-                                                std::slice::from_ref(&result.stream),
-                                            );
-
-                                            // Track presence stream if enabled
-                                            if result.presence {
-                                                session.set_presence_stream(
-                                                    &identifier,
-                                                    result.stream.clone(),
-                                                );
-                                            }
-
-                                            // Track whisper stream if enabled
-                                            if result.whisper {
-                                                session.set_whisper_stream(
-                                                    &identifier,
-                                                    result.stream.clone(),
-                                                );
-                                            }
-                                        }
-
-                                        hub.subscribe_to_stream(conn_id, &result.stream);
-
-                                        // Subscribe to pub/sub if needed
-                                        if let Some(ref ps) = pubsub
-                                            && hub.stream_subscriber_count(&result.stream) == 1
-                                            && let Err(e) = ps.subscribe(&result.stream).await
-                                        {
-                                            warn!(
-                                                stream = %result.stream,
-                                                error = %e,
-                                                "Failed to subscribe pubsub"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!(
-                                            conn_id,
-                                            error = %e,
-                                            "Signed stream verification failed"
-                                        );
-                                        let reject = ServerMessage::RejectSubscription {
-                                            identifier: identifier.clone(),
-                                        };
-                                        hub.send(conn_id, &actioncable::encode(&reject)).await;
-                                    }
-                                }
-                                continue;
-                            }
-
-                            // Standard RPC subscription
-                            let Some((response, status)) = exchange_command(
-                                &rpc,
-                                &hub,
-                                &config,
-                                conn_id,
-                                "subscribe",
-                                &identifier,
-                                String::new(),
-                            )
-                            .await
-                            else {
-                                continue;
-                            };
-
-                            if status == Status::Success {
-                                let (added_streams, removed_streams, presence_stream) =
-                                    if let Some(mut session) = hub.get_session_mut(conn_id) {
-                                        session.subscribe(identifier.clone());
-
-                                        let mut pstream = None;
-                                        if let Some(env) = response.env {
-                                            session.set_cstate(env.cstate.clone());
-                                            if !env.istate.is_empty() {
-                                                session.set_istate(&identifier, env.istate.clone());
-                                                // Check for presence stream in istate
-                                                if let Some(ps) = env
-                                                    .istate
-                                                    .get(crate::session::PRESENCE_STREAM_STATE)
-                                                {
-                                                    session.set_presence_stream(
-                                                        &identifier,
-                                                        ps.clone(),
-                                                    );
-                                                    pstream = Some(ps.clone());
-                                                }
-                                                // Check for whisper stream in istate
-                                                if let Some(ws) = env
-                                                    .istate
-                                                    .get(crate::session::WHISPER_STREAM_STATE)
-                                                {
-                                                    session.set_whisper_stream(
-                                                        &identifier,
-                                                        ws.clone(),
-                                                    );
-                                                }
-                                            }
-                                        }
-
-                                        let mut removed = Vec::new();
-                                        if response.stop_streams {
-                                            removed = session
-                                                .remove_all_subscription_streams(&identifier);
-                                        } else if !response.stopped_streams.is_empty() {
-                                            removed = session.remove_subscription_streams(
-                                                &identifier,
-                                                &response.stopped_streams,
-                                            );
-                                        }
-
-                                        let added = if response.streams.is_empty() {
-                                            Vec::new()
-                                        } else {
-                                            session.add_subscription_streams(
-                                                &identifier,
-                                                &response.streams,
-                                            )
-                                        };
-
-                                        (added, removed, pstream)
-                                    } else {
-                                        (Vec::new(), Vec::new(), None)
-                                    };
-
-                                apply_stream_changes(
-                                    &hub,
-                                    &pubsub,
-                                    conn_id,
-                                    added_streams,
-                                    removed_streams,
-                                )
-                                .await;
-
-                                // Handle presence join from RPC response
-                                if let Some(ref p) = response.presence
-                                    && let Some(ref pstream) = presence_stream
-                                {
-                                    let session_id = conn_id.to_string();
-                                    let presence_id = p.id.clone();
-                                    let info: serde_json::Value = if p.info.is_empty() {
-                                        serde_json::Value::Null
-                                    } else {
-                                        serde_json::from_str(&p.info)
-                                            .unwrap_or(serde_json::Value::Null)
-                                    };
-
-                                    if let Some(event) =
-                                        presence.join(pstream, &session_id, &presence_id, info)
-                                    {
-                                        broadcast_presence_event(&hub, pstream, &event).await;
-                                    }
-
-                                    // Subscribe session to presence stream for broadcasts
-                                    hub.subscribe_to_stream(conn_id, pstream);
-                                }
-                            }
-                        }
-                        ClientCommand::Unsubscribe { identifier } => {
-                            let Some((response, status)) = exchange_command(
-                                &rpc,
-                                &hub,
-                                &config,
-                                conn_id,
-                                "unsubscribe",
-                                &identifier,
-                                String::new(),
-                            )
-                            .await
-                            else {
-                                continue;
-                            };
-
-                            if status == Status::Success {
-                                let (added_streams, removed_streams, presence_stream) =
-                                    if let Some(mut session) = hub.get_session_mut(conn_id) {
-                                        session.unsubscribe(&identifier);
-
-                                        // Get presence stream before removing
-                                        let pstream = session.remove_presence_stream(&identifier);
-
-                                        // Remove whisper stream
-                                        session.remove_whisper_stream(&identifier);
-
-                                        if let Some(env) = response.env {
-                                            session.set_cstate(env.cstate);
-                                            if !env.istate.is_empty() {
-                                                session.set_istate(&identifier, env.istate);
-                                            }
-                                        }
-
-                                        let removed = if response.stop_streams {
-                                            session.remove_all_subscription_streams(&identifier)
-                                        } else if !response.stopped_streams.is_empty() {
-                                            session.remove_subscription_streams(
-                                                &identifier,
-                                                &response.stopped_streams,
-                                            )
-                                        } else {
-                                            session.remove_all_subscription_streams(&identifier)
-                                        };
-
-                                        let added = if response.streams.is_empty() {
-                                            Vec::new()
-                                        } else {
-                                            session.add_subscription_streams(
-                                                &identifier,
-                                                &response.streams,
-                                            )
-                                        };
-
-                                        (added, removed, pstream)
-                                    } else {
-                                        (Vec::new(), Vec::new(), None)
-                                    };
-
-                                apply_stream_changes(
-                                    &hub,
-                                    &pubsub,
-                                    conn_id,
-                                    added_streams,
-                                    removed_streams,
-                                )
-                                .await;
-
-                                // Handle presence leave on unsubscribe
-                                if let Some(pstream) = presence_stream {
-                                    let session_id = conn_id.to_string();
-                                    if let Some(event) = presence.leave(&pstream, &session_id) {
-                                        broadcast_presence_event(&hub, &pstream, &event).await;
-                                    }
-                                    hub.unsubscribe_from_stream(conn_id, &pstream);
-                                }
-                            }
-                        }
-                        ClientCommand::Message { identifier, data } => {
-                            let Some((response, status)) = exchange_command(
-                                &rpc,
-                                &hub,
-                                &config,
-                                conn_id,
-                                "message",
-                                &identifier,
-                                data,
-                            )
-                            .await
-                            else {
-                                continue;
-                            };
-
-                            if status == Status::Success
-                                && let Some(mut session) = hub.get_session_mut(conn_id)
-                                && let Some(env) = response.env
-                            {
-                                session.set_cstate(env.cstate);
-                                if !env.istate.is_empty() {
-                                    session.set_istate(&identifier, env.istate);
-                                }
-                            }
-                        }
-                        ClientCommand::Join { identifier, presence: presence_data } => {
-                            let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
-                            else {
-                                continue;
-                            };
-
-                            // Get presence data from command or fall back to connection identifiers
-                            let (presence_id, info) = match presence_data {
-                                Some(p) => (p.id, p.info.unwrap_or(serde_json::Value::Null)),
-                                None => {
-                                    let id = hub
-                                        .get_session(conn_id)
-                                        .and_then(|s| s.connection_identifiers.clone())
-                                        .unwrap_or_else(|| conn_id.to_string());
-                                    (id, serde_json::Value::Null)
-                                }
-                            };
-
-                            let session_id = conn_id.to_string();
-                            if let Some(event) =
-                                presence.join(&pstream, &session_id, &presence_id, info)
-                            {
-                                broadcast_presence_event(&hub, &pstream, &event).await;
-                            }
-                        }
-                        ClientCommand::Leave { identifier } => {
-                            let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
-                            else {
-                                continue;
-                            };
-
-                            let session_id = conn_id.to_string();
-                            if let Some(event) = presence.leave(&pstream, &session_id) {
-                                broadcast_presence_event(&hub, &pstream, &event).await;
-                            }
-                        }
-                        ClientCommand::Presence { identifier } => {
-                            let Some(pstream) = resolve_presence_stream(&hub, conn_id, &identifier)
-                            else {
-                                continue;
-                            };
-
-                            let info = presence.info(&pstream);
-                            let msg = actioncable::ServerMessage::Message {
-                                identifier: identifier.clone(),
-                                message: serde_json::json!({
-                                    "type": "presence",
-                                    "info": info
-                                }),
-                            };
-                            hub.send(conn_id, &actioncable::encode(&msg)).await;
-                        }
-                        ClientCommand::Whisper { identifier, data } => {
-                            // Get whisper stream from session
-                            let whisper_stream = match hub.get_session(conn_id) {
-                                Some(session) => {
-                                    session.get_whisper_stream(&identifier).map(|s| s.to_string())
-                                }
-                                None => {
-                                    warn!(conn_id, "Received whisper for unknown session");
-                                    continue;
-                                }
-                            };
-
-                            let Some(wstream) = whisper_stream else {
-                                warn!(conn_id, identifier, "No whisper stream for subscription");
-                                continue;
-                            };
-
-                            // Parse data as JSON
-                            let message: serde_json::Value = match serde_json::from_str(&data) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    warn!(conn_id, error = %e, "Invalid whisper data");
-                                    continue;
-                                }
-                            };
-
-                            // Broadcast excluding sender
-                            let broadcast_msg = actioncable::ServerMessage::Message {
-                                identifier: identifier.clone(),
-                                message,
-                            };
-                            hub.broadcast_excluding(
-                                &wstream,
-                                &actioncable::encode(&broadcast_msg),
-                                conn_id,
-                            )
-                            .await;
-                        }
-                    }
-                }
-
-                MessageType::Disembark => {
-                    let disembark: protocol::Disembark = serde_json::from_slice(&payload)?;
-                    debug!(
-                        conn_id = disembark.conn_id,
-                        code = disembark.code,
-                        reason = %disembark.reason,
-                        "Connection disembarked"
-                    );
-
-                    // Clean up presence for all subscriptions before RPC disconnect
-                    let session_id = disembark.conn_id.to_string();
-                    let presence_events = presence.remove_session(&session_id);
-                    for (stream, event) in presence_events {
-                        broadcast_presence_event(&hub, &stream, &event).await;
-                    }
-
-                    rpc_disconnect(&rpc, &hub, disembark.conn_id, &config).await;
-                    hub.remove_session(disembark.conn_id);
-                }
-
-                _ => {
-                    warn!(msg_type = ?msg_type, "Unhandled message type");
-                }
-            }
+        tokio::select! {
+            _ = term.recv() => info!("SIGTERM received"),
+            () = ctrl_c() => info!("Interrupt received"),
         }
     }
 
-    writer_handle.abort();
+    #[cfg(not(unix))]
+    ctrl_c().await;
+}
 
-    // Cleanup socket
-    if socket_path.exists() {
-        let _ = tokio::fs::remove_file(&socket_path).await;
+/// Resolve on ctrl-c.
+///
+/// A handler that cannot be installed is logged and then never resolves: the
+/// default disposition still ends the process on an interrupt (without a
+/// drain), which beats mistaking the failure for an interrupt and shutting a
+/// healthy relay down at boot.
+async fn ctrl_c() {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        error!(error = %e, "Cannot listen for ctrl-c; an interrupt will not drain");
+        std::future::pending::<()>().await;
     }
-
-    info!("OrbitCast shutdown");
-    Ok(())
 }

@@ -1,0 +1,115 @@
+{
+  "description": "Control messages that must fail closed. An unknown kind is a hard decode error: a node that cannot understand a control message must not apply a guessed-at fraction of it. The reason must be one the ActionCable client understands, and every authorization-bearing field defaults to an invalid value.",
+  "cases": [
+    {
+      "name": "unknown_kind",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"self_destruct\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unknown_kind"
+      }
+    },
+    {
+      "name": "missing_kind",
+      "input": {
+        "wire": "{\"version\":1,\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "wrong_type"
+      }
+    },
+    {
+      "name": "unsupported_version",
+      "input": {
+        "wire": "{\"version\":2,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unsupported_version"
+      }
+    },
+    {
+      "name": "empty_namespace",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_namespace"
+      }
+    },
+    {
+      "name": "missing_control_id",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_field"
+      }
+    },
+    {
+      "name": "control_id_that_is_not_a_uuid",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"42\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "invalid_uuid"
+      }
+    },
+    {
+      "name": "missing_identity_key",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_field"
+      }
+    },
+    {
+      "name": "unlisted_reason",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"vibes\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "disallowed_value"
+      }
+    },
+    {
+      "name": "missing_reason",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_field"
+      }
+    },
+    {
+      "name": "reconnect_of_the_wrong_type",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\",\"reconnect\":\"yes\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "wrong_type"
+      }
+    },
+    {
+      "name": "truncated_control_message",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\""
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "malformed_json"
+      }
+    }
+  ]
+}

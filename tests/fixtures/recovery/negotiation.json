@@ -1,0 +1,208 @@
+{
+  "description": "Recovery negotiation on the reserved Orbitcast::RecoveryChannel. Client commands (`resume`, `ack`) ride the `data` field of an ordinary ActionCable message/perform command under the reserved action `orbitcast_recovery`; server answers (`replay_start`, `replay_done`, `gap`) ride an ordinary addressed message. An unknown op, event, or gap reason is a hard decode error - never a defaulted operation - and an unusable cursor is a semantic rejection.",
+  "cases": [
+    {
+      "name": "resume_with_cursors",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_recovery\",\"op\":\"resume\",\"cursors\":{\"chat:42\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\",\"posts:1\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiIwIn0=\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "resume",
+        "cursor_streams": ["chat:42", "posts:1"],
+        "cursor_sequences": { "chat:42": "7", "posts:1": "0" }
+      }
+    },
+    {
+      "name": "resume_without_cursors_asks_for_no_history",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"action\":\"orbitcast_recovery\",\"op\":\"resume\"}"
+      },
+      "expect": { "valid": true, "version": 1, "op": "resume", "cursor_streams": [] }
+    },
+    {
+      "name": "ack_is_a_receipt",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_recovery\",\"op\":\"ack\",\"cursors\":{\"chat:42\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\"},\"applied\":true}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "ack",
+        "cursor_streams": ["chat:42"],
+        "ignored_fields": ["applied"]
+      }
+    },
+    {
+      "name": "unknown_op",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_recovery\",\"op\":\"rewind\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unknown_op" }
+    },
+    {
+      "name": "absent_op",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_recovery\"}"
+      },
+      "expect": { "valid": false, "error_kind": "wrong_type" }
+    },
+    {
+      "name": "a_foreign_action_in_the_recovery_envelope",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"resume\"}"
+      },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "an_unusable_cursor_is_rejected_rather_than_guessed",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_recovery\",\"op\":\"resume\",\"cursors\":{\"chat:42\":\"nonsense\"}}"
+      },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "a_cursor_for_an_empty_stream_name",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_recovery\",\"op\":\"resume\",\"cursors\":{\"\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\"}}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_stream" }
+    },
+    {
+      "name": "unsupported_command_version",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":99,\"action\":\"orbitcast_recovery\",\"op\":\"resume\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unsupported_version" }
+    },
+    {
+      "name": "replay_start",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"replay_start\",\"streams\":[\"chat:42\",\"posts:1\"]}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "replay_start",
+        "streams": ["chat:42", "posts:1"]
+      }
+    },
+    {
+      "name": "replay_done_carries_the_live_position",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"replay_done\",\"cursors\":{\"chat:42\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "replay_done",
+        "cursor_streams": ["chat:42"],
+        "cursor_sequences": { "chat:42": "7" }
+      }
+    },
+    {
+      "name": "gap_expired",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"stream\":\"chat:42\",\"reason\":\"expired\"}"
+      },
+      "expect": { "valid": true, "version": 1, "event": "gap", "stream": "chat:42", "reason": "expired" }
+    },
+    {
+      "name": "gap_unknown_generation",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"stream\":\"chat:42\",\"reason\":\"unknown_generation\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "gap",
+        "stream": "chat:42",
+        "reason": "unknown_generation"
+      }
+    },
+    {
+      "name": "gap_fenced",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"stream\":\"chat:42\",\"reason\":\"fenced\"}"
+      },
+      "expect": { "valid": true, "version": 1, "event": "gap", "stream": "chat:42", "reason": "fenced" }
+    },
+    {
+      "name": "gap_buffer_overflow",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"stream\":\"chat:42\",\"reason\":\"buffer_overflow\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "gap",
+        "stream": "chat:42",
+        "reason": "buffer_overflow"
+      }
+    },
+    {
+      "name": "unknown_event",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"rewound\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unknown_event" }
+    },
+    {
+      "name": "unknown_gap_reason",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"stream\":\"chat:42\",\"reason\":\"vibes\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unknown_reason" }
+    },
+    {
+      "name": "gap_without_a_reason",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"stream\":\"chat:42\"}"
+      },
+      "expect": { "valid": false, "error_kind": "missing_payload" }
+    },
+    {
+      "name": "gap_without_a_stream",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"gap\",\"reason\":\"expired\"}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_stream" }
+    },
+    {
+      "name": "replay_start_without_streams",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"orbitcast_recovery\",\"event\":\"replay_start\"}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_field" }
+    },
+    {
+      "name": "wrong_message_type",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"replay_done\"}"
+      },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    }
+  ]
+}

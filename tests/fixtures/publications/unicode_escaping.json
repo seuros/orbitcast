@@ -1,0 +1,62 @@
+{
+  "description": "Unicode and escape handling. json_payload is envelope-quoted JSON text that must survive byte-for-byte: no re-encoding, no escape normalization, no key reordering. payload_values is what parsing that text yields.",
+  "cases": [
+    {
+      "name": "raw_unicode_payload",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"inline\",\"publication\":{\"version\":1,\"namespace\":\"example_production\",\"id\":\"4b8e6cb6-56f1-4f3e-9c86-3d1b2f0a7c11\",\"stream\":\"chat:42\",\"json_payload\":\"{\\\"body\\\":\\\"héllo 🚀\\\",\\\"note\\\":\\\"ünïcode\\\"}\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "inline",
+        "namespace": "example_production",
+        "stream": "chat:42",
+        "id": "4b8e6cb6-56f1-4f3e-9c86-3d1b2f0a7c11",
+        "json_payload": "{\"body\":\"héllo 🚀\",\"note\":\"ünïcode\"}",
+        "payload_values": {
+          "body": "héllo 🚀",
+          "note": "ünïcode"
+        },
+        "channel": "orbitcast_75ba535bd0c12e8f0990bf756607b4f5ddb148f2e22070e1"
+      }
+    },
+    {
+      "name": "escape_sequences_preserved",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"inline\",\"publication\":{\"version\":1,\"namespace\":\"example_production\",\"id\":\"0f8d3b62-91a4-4c7e-b25d-6e1a9c4f7d30\",\"stream\":\"chat:42\",\"json_payload\":\"{\\\"a\\\":\\\"line\\\\nbreak\\\",\\\"b\\\":\\\"é\\\",\\\"q\\\":\\\"\\\\\\\"\\\"}\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "inline",
+        "namespace": "example_production",
+        "stream": "chat:42",
+        "id": "0f8d3b62-91a4-4c7e-b25d-6e1a9c4f7d30",
+        "json_payload": "{\"a\":\"line\\nbreak\",\"b\":\"é\",\"q\":\"\\\"\"}",
+        "payload_values": {
+          "a": "line\nbreak",
+          "b": "é",
+          "q": "\""
+        },
+        "channel": "orbitcast_75ba535bd0c12e8f0990bf756607b4f5ddb148f2e22070e1"
+      }
+    },
+    {
+      "name": "unicode_namespace_and_stream",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"inline\",\"publication\":{\"version\":1,\"namespace\":\"café\",\"id\":\"9d2f1c04-7c3a-4e5b-8a66-f0e9d8c7b6a5\",\"stream\":\"stream:ünïcode\",\"json_payload\":\"{}\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "inline",
+        "namespace": "café",
+        "stream": "stream:ünïcode",
+        "id": "9d2f1c04-7c3a-4e5b-8a66-f0e9d8c7b6a5",
+        "json_payload": "{}",
+        "channel": "orbitcast_b630c21a8012cd05b047cec754aad9601a46823df496aa85"
+      }
+    }
+  ]
+}

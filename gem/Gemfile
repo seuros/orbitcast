@@ -1,0 +1,29 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+# Runtime dependencies come from orbitcast.gemspec.
+gemspec
+
+group :development, :test do
+  gem "minitest", "~> 5.25"
+  gem "rake", "~> 13.0"
+
+  # json 3.0 made JSON.parse's options keyword-only, which breaks
+  # ActiveSupport::JSON.decode on activesupport 8.1.3 — and with it signed
+  # cookies (ActiveSupport::Messages::Metadata) and ActionCable's own
+  # identifier decoding. Orbitcast's own code uses JSON.parse directly and is
+  # unaffected; the dummy application is not, so the harness pins the version
+  # Rails 8.1 actually works with.
+  gem "json", "< 3"
+
+  # test/dummy: a real Rails 8.1 application used as the signing-fixture
+  # producer and the future WebSocket integration harness. The plain unit suite
+  # (`ruby -Ilib -Itest`) runs without any of these, so a checkout that never
+  # boots the dummy app needs no Rails, Turbo, or SQLite.
+  gem "importmap-rails", "~> 2.0"
+  gem "propshaft", "~> 1.1"
+  gem "rails", ">= 8.1"
+  gem "sqlite3", ">= 2.0"
+  gem "turbo-rails", "~> 2.0"
+end

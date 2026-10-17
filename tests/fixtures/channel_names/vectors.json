@@ -1,0 +1,35 @@
+{
+  "description": "Golden vectors for PostgreSQL channel-name derivation: \"orbitcast_\" + first 48 lowercase hex chars of SHA-256 over the length-prefixed UTF-8 (namespace, stream) tuple (4-byte big-endian byte-length prefix before each part). 58 ASCII bytes, below PostgreSQL's 63-byte identifier limit. Changing any vector is a wire break, not a refactor.",
+  "cases": [
+    {
+      "name": "example_production_chat",
+      "input": {
+        "namespace": "example_production",
+        "stream": "chat:42"
+      },
+      "expect": {
+        "channel": "orbitcast_75ba535bd0c12e8f0990bf756607b4f5ddb148f2e22070e1"
+      }
+    },
+    {
+      "name": "demo_posts",
+      "input": {
+        "namespace": "demo",
+        "stream": "posts:1"
+      },
+      "expect": {
+        "channel": "orbitcast_c5748d585378540c557a6893ad3d8866d449a7673b2590b9"
+      }
+    },
+    {
+      "name": "unicode_namespace_and_stream",
+      "input": {
+        "namespace": "café",
+        "stream": "stream:ünïcode"
+      },
+      "expect": {
+        "channel": "orbitcast_b630c21a8012cd05b047cec754aad9601a46823df496aa85"
+      }
+    }
+  ]
+}

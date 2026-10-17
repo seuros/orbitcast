@@ -1,3 +1,9 @@
+# CI: Rust lint/tests (both feature sets), the plain-Ruby gem suite, the
+# Rails contract test (Bundler + dummy app), the cross-language contract
+# suites, and the PostgreSQL integration job.
+#
+# Toolchain: every job installs from the root mise.toml (jdx/mise-action) —
+# one place to bump both Ruby and Rust, same as every other ship in the fleet.
 name: CI
 
 on:
@@ -10,68 +16,130 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install Rust (mise.toml)
+        uses: jdx/mise-action@v4
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check memory backend
-        run: cargo check --no-default-features --features memory
+      - name: rustfmt
+        run: cargo fmt --check
 
-      - name: Check postgres backend
-        run: cargo check --features postgres
+      - name: clippy (default features = postgres)
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run tests
-        run: cargo test --no-default-features --features memory
+      - name: clippy (memory backend)
+        run: cargo clippy --all-targets --no-default-features --features memory -- -D warnings
 
-  build-targets:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+      # memory and postgres are tested separately; the combined
+      # feature selection resolves to memory, so --all-features is not a
+      # substitute for the postgres set.
+      - name: test (default features = postgres)
+        run: cargo test --locked
+
+      - name: test (memory backend)
+        run: cargo test --locked --no-default-features --features memory
+
+  ruby:
+    name: Ruby (mise.toml)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ruby (mise.toml)
+        uses: jdx/mise-action@v4
+
+      # Plain-ruby Minitest: no Bundler, no Rails boot, no database
+      # (see gem/test/test_helper.rb). rake is a bundled gem.
+      - name: gem tests
+        run: rake test:gem
+
+  # The Rails-facing half of the gem: the dummy application in gem/test/dummy
+  # is booted, so this needs Bundler, Rails, and SQLite from gem/Gemfile. Kept
+  # out of the matrix job above on purpose — that one must keep proving the
+  # unit suite runs with nothing but plain Ruby.
+  rails:
+    name: Rails contract
+    runs-on: ubuntu-24.04
+    env:
+      BUNDLE_GEMFILE: gem/Gemfile
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ruby (mise.toml)
+        uses: jdx/mise-action@v4
+
+      - name: Install gems
+        run: bundle install --jobs 4
+
+      - name: Rails contract test
+        run: bundle exec ruby -Igem/lib -Igem/test gem/test/rails_contract_test.rb
+
+  # Cross-language contract suites over the same checked-in fixtures
+  # (tests/fixtures): tests/contract.rs validates, gem/test/contract_test.rb
+  # produces. Ordinary tests, not a schema-generation step: fixtures are the
+  # contract.
+  contract:
+    name: Contract fixtures (Rust + Ruby)
+    runs-on: ubuntu-24.04
+    env:
+      BUNDLE_GEMFILE: gem/Gemfile
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ruby and Rust (mise.toml)
+        uses: jdx/mise-action@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install gems
+        run: bundle install --jobs 4
+
+      - name: rake contract:test
+        run: rake contract:test
+
+  # PostgreSQL integration tests: the `#[ignore]`-marked tests in
+  # src/{broker,presence,pubsub}/postgres.rs and tests/ingress.rs, which each
+  # work in their own pid-derived namespace and create the tables the gem
+  # migrations create. Default features are the postgres set.
+  postgres-integration:
+    name: Postgres ${{ matrix.postgres }} integration
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
-
+        postgres: ["18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: orbitcast
+          POSTGRES_PASSWORD: orbitcast
+          POSTGRES_DB: orbitcast_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://orbitcast:orbitcast@localhost:5432/orbitcast_test
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install protobuf compiler (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
-
-      - name: Install protobuf compiler (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
+      - name: Install Rust (mise.toml)
+        uses: jdx/mise-action@v4
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features memory
+      - name: integration tests
+        run: cargo test --locked -- --ignored

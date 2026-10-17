@@ -1,0 +1,33 @@
+{
+  "description": "A presence command carries no identity. `subject_id`, `metadata`, `stream`, and `ttl_ms` are not fields of this envelope: a client that sends them anyway has them ignored as unknown fields, and the server takes all four from the Rails `presence_grant` effect instead. Both language suites assert the same thing: after decoding, the re-encoded command contains none of them.",
+  "cases": [
+    {
+      "name": "a_client_naming_another_subject",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"join\",\"subject_id\":\"user:999\",\"metadata\":{\"role\":\"admin\"},\"stream\":\"chat:other\",\"ttl_ms\":86400000}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "join",
+        "page": { "limit": 50, "offset": 0 },
+        "ignored_fields": ["subject_id", "metadata", "stream", "ttl_ms"]
+      }
+    },
+    {
+      "name": "a_client_asking_for_a_longer_lease_on_a_snapshot",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"action\":\"orbitcast_presence\",\"op\":\"snapshot\",\"ttl_ms\":600000,\"node_id\":\"node-elsewhere\",\"session_id\":\"00000000-0000-4000-8000-000000000000\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "op": "snapshot",
+        "page": { "limit": 50, "offset": 0 },
+        "ignored_fields": ["ttl_ms", "node_id", "session_id"]
+      }
+    }
+  ]
+}

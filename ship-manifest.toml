@@ -41,13 +41,81 @@ http = "0.0.0.0:80"
 #   mothership --only web,api      # Ships tagged "web" OR "api"
 #   mothership --except workers    # All except "workers"
 
-# OrbitCast WebSocket server (docking protocol bay)
+# OrbitCast WebSocket relay (docking protocol bay).
+# Signed mode here: subscriptions authorized via signed streams (Turbo).
+# Secrets set in this file arrive as plain text through the Moored handshake;
+# base64 environment secrets (ORBITCAST_*_SECRET_BASE64) win over them, and
+# the two service credentials (ORBITCAST_RPC_TOKEN_BASE64,
+# ORBITCAST_INGRESS_TOKEN_BASE64) are environment-only — the handshake can
+# never carry them, and it cannot open listeners (listen_addr / ingress_*).
 [[bays.websocket]]
 name = "orbitcast"
 command = "target/release/orbitcast"
 tags = ["websocket", "actioncable"]
-config = { database_url = "postgres://localhost/myapp_development" }
 routes = [
   { bind = "http", pattern = "/cable" },
 ]
+
+[bays.websocket.config]
+database_url = "postgres://localhost/myapp_development"
+# Optional separate DSN for the LISTEN session (must address the same cable
+# database; direct connection or session-mode pooler, never transaction
+# pooling). Defaults to database_url.
+# listener_database_url = "postgres://localhost/myapp_development"
+# Required by the PostgreSQL pub/sub backend: part of every channel name and
+# every publication envelope, and re-validated on receipt. Two deployments
+# sharing a database must not share a namespace. Must match the Rails
+# publisher's namespace.
+namespace = "myapp_development"
+# Optional pub/sub tuning:
+# pubsub_ack_timeout_ms = "5000"    # LISTEN/UNLISTEN acknowledgement deadline
+# pubsub_queue_capacity = "1024"    # bound on notification intake/delivery queues
+# Overflow relay for publications too large for a NOTIFY payload (8000 bytes).
+# Requires the orbitcast_payloads migration on this database and the same
+# setting on the Rails publisher; nothing creates the table implicitly.
+# overflow_enabled = "true"          # default false
+# overflow_ttl_ms = "300000"         # relay row lifetime, database clock
+# max_publication_size = "1048576"   # reject publications above this size
+# Proxies whose Forwarded / X-Forwarded-For headers are trusted for the
+# client address (CIDRs). Mothership fronts this bay, so list its address
+# tier; an empty list attributes every connection to its TCP peer.
+# trusted_proxies = ["127.0.0.1/32"]
+# Per-socket outbound queue bounds; overflow is lag: the socket is closed
+# with a reconnectable disconnect and counted.
+# outbound_queue_messages = "256"
+# outbound_queue_bytes = "1048576"
+turbo_streams = "true"
+turbo_streams_secret = "development-only-secret"
+# Previous verification keys during a rotation (verified, never signed with)
+# are environment-only: ORBITCAST_TURBO_PREVIOUS_SECRETS_BASE64 /
+# ORBITCAST_STREAMS_PREVIOUS_SECRETS_BASE64.
+# Other signing profiles:
+# streams_secret = "..."             # Orbitcast::StreamsChannel claims tokens
+# cable_ready_streams = "true"
+# cable_ready_secret = "..."
+# public_streams = "true"            # unsigned streams; development only
+# Rails dispatch (the credential is NOT configurable here — export
+# ORBITCAST_RPC_TOKEN_BASE64 in the ship's environment):
+# rpc_endpoint_url = "http://127.0.0.1:3000/_orbitcast/v1/rails"
+# node_id = "node-1"
+# rpc_deadline_ms = "1000"
+# rpc_max_concurrency = "64"
+# rpc_forward_headers = "cookie,authorization"
+# Presence lease tuning. Presence is dispatch-mode only and granted per
+# subscription by Rails (`grant_presence`); it needs the orbitcast_presence
+# migration. There is no signed-mode presence and no switch to turn it on:
+# a grant is what enables it. presence_ttl_ms caps the TTL a grant may ask
+# for; the granted TTL is kept for the lease's whole life.
+# presence_ttl_ms = "45000"                 # 1..600000
+# presence_refresh_interval_ms = "10000"    # must be < presence_ttl_ms
+# Retained broker + recovery (needs the orbitcast_broker migration):
+# broker_enabled = "true"                   # default false
+# broker_streams = "chat:,notifications:"   # prefix allowlist; empty = all
+# broker_retention_secs = "300"             # 1..86400
+# broker_max_messages_per_stream = "1000"
+# broker_max_bytes_per_stream = "4194304"
+# broker_reconcile_interval_ms = "5000"
+# broker_replay_buffer = "256"
+# broker_session_ttl_secs = "3600"
+# recovery_secret = "..."                   # requires broker_enabled
 

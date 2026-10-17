@@ -1,0 +1,155 @@
+{
+  "description": "REAL turbo-rails signed stream names, produced by the dummy Rails application (gem/test/dummy) through Turbo::StreamsChannel.signed_stream_name. Format: base64_standard(JSON(stream_string)) + \"--\" + hex(HMAC-SHA256(key, encoded)). The key is raw bytes exported as strict base64 in input.key_base64; Rust must decode it to bytes (ORBITCAST_TURBO_SECRET_BASE64), never treat it as text. `rust_status` records whether src/streams.rs MessageVerifier accepts the case as-is.",
+  "producer": {
+    "script": "gem/test/dummy/script/export_turbo_stream_fixtures.rb",
+    "turbo_rails_version": "2.0.23",
+    "rails_version": "8.1.3.1",
+    "verifier": "ActiveSupport::MessageVerifier.new(key, digest: \"SHA256\", serializer: JSON)",
+    "key_source": "Rails.application.key_generator.generate_key(\"turbo/signed_stream_verifier_key\") in a real application; pinned raw bytes here"
+  },
+  "rust_contract": {
+    "key": "base64-decode input.key_base64 to raw bytes; key it into SecretBytes/MessageVerifier",
+    "accept": "MessageVerifier::new(key).verify(input.signed_stream_name) == Ok(expect.stream)",
+    "controller": "StreamsController::new(StreamsConfig { turbo: true, turbo_secret: Some(key), .. }, namespace) .handles(input.identifier) is true and .resolve(input.identifier) yields StreamResult { stream: expect.stream, whisper: false, presence: false }",
+    "negative": "flipping one hex character of expect.signature must yield VerifyError::InvalidSignature; verifying with a different key must not fall back to the Orbitcast claims secret",
+    "mismatch_rule": "a case with \"rust_status\": \"mismatch\" documents real turbo-rails output the current verifier does NOT accept; assert the documented rejection, do not silently loosen the verifier"
+  },
+  "rendered_page": {
+    "template": "demo/show",
+    "channel": "Turbo::StreamsChannel",
+    "signed_stream_name": "ImRlbW8i--7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0",
+    "element": "<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"ImRlbW8i--7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0\">"
+  },
+  "cases": [
+    {
+      "name": "turbo_stream_from_demo",
+      "description": "Exactly what `turbo_stream_from \"demo\"` puts in the page: Turbo::StreamsChannel.signed_stream_name([\"demo\"]).",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "array",
+          "value": [
+            "demo"
+          ]
+        },
+        "signed_stream_name": "ImRlbW8i--7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"ImRlbW8i--7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0\"}"
+      },
+      "expect": {
+        "stream": "demo",
+        "encoded_payload": "ImRlbW8i",
+        "payload_json": "\"demo\"",
+        "signature": "7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": false,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    },
+    {
+      "name": "plain_string_streamable",
+      "description": "The single-string form, signed_stream_name(\"demo\"). Turbo joins arrays with ':' but a bare string is passed through, so this must equal the one-element array case.",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "string",
+          "value": "demo"
+        },
+        "signed_stream_name": "ImRlbW8i--7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"ImRlbW8i--7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0\"}"
+      },
+      "expect": {
+        "stream": "demo",
+        "encoded_payload": "ImRlbW8i",
+        "payload_json": "\"demo\"",
+        "signature": "7023077ee18639e8ab5c492f6a02840dcb8bd4d19db905330c9f79fe9fb2a8e0",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": false,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    },
+    {
+      "name": "joined_streamables_padded_base64",
+      "description": "Multiple streamables are joined with ':'. The payload length forces base64 '=' padding, which a URL-safe/unpadded decoder would reject — Rust decodes with the padded standard alphabet.",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "array",
+          "value": [
+            "account",
+            5,
+            "entries"
+          ]
+        },
+        "signed_stream_name": "ImFjY291bnQ6NTplbnRyaWVzIg==--03486ec516bc4bd67b12696fd74520d9ad6656e78bd25f6f514aff5edcd0a763",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"ImFjY291bnQ6NTplbnRyaWVzIg==--03486ec516bc4bd67b12696fd74520d9ad6656e78bd25f6f514aff5edcd0a763\"}"
+      },
+      "expect": {
+        "stream": "account:5:entries",
+        "encoded_payload": "ImFjY291bnQ6NTplbnRyaWVzIg==",
+        "payload_json": "\"account:5:entries\"",
+        "signature": "03486ec516bc4bd67b12696fd74520d9ad6656e78bd25f6f514aff5edcd0a763",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": true,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    },
+    {
+      "name": "unicode_streamable",
+      "description": "Non-ASCII stream name. turbo-rails' JSON serializer emits raw UTF-8 (no \\u escapes); Rust decodes base64 -> UTF-8 -> JSON string.",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "array",
+          "value": [
+            "room:ünïcode/🚀"
+          ]
+        },
+        "signed_stream_name": "InJvb206w7xuw69jb2RlL/CfmoAi--05f7d70bacadc04f76b22a5a3c966146726b24647e6fecd65b1d2e5b7e70bf7d",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"InJvb206w7xuw69jb2RlL/CfmoAi--05f7d70bacadc04f76b22a5a3c966146726b24647e6fecd65b1d2e5b7e70bf7d\"}"
+      },
+      "expect": {
+        "stream": "room:ünïcode/🚀",
+        "encoded_payload": "InJvb206w7xuw69jb2RlL/CfmoAi",
+        "payload_json": "\"room:ünïcode/🚀\"",
+        "signature": "05f7d70bacadc04f76b22a5a3c966146726b24647e6fecd65b1d2e5b7e70bf7d",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": false,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    },
+    {
+      "name": "quote_and_backslash_streamable",
+      "description": "Stream name containing characters the JSON serializer must escape. The escaped bytes are what the HMAC covers.",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "array",
+          "value": [
+            "say \"hi\"\\now"
+          ]
+        },
+        "signed_stream_name": "InNheSBcImhpXCJcXG5vdyI=--74411a9b00d454fe4a0359dccd8ecd5ab6696248307cdbebbdce7a31e18870bd",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"InNheSBcImhpXCJcXG5vdyI=--74411a9b00d454fe4a0359dccd8ecd5ab6696248307cdbebbdce7a31e18870bd\"}"
+      },
+      "expect": {
+        "stream": "say \"hi\"\\now",
+        "encoded_payload": "InNheSBcImhpXCJcXG5vdyI=",
+        "payload_json": "\"say \\\"hi\\\"\\\\now\"",
+        "signature": "74411a9b00d454fe4a0359dccd8ecd5ab6696248307cdbebbdce7a31e18870bd",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": true,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "description": "Correctly signed token whose claims expired before input.now. The signature authenticates, but semantic validation must fail closed.",
+  "cases": [
+    {
+      "name": "expired_token",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjEwMDAwMDAwMDB9--d337dd296936c5efc45f1cc1595f5ca60dd93a746d3f3242b64a88e1f76c9b6b",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "expired",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 1000000000
+        }
+      }
+    }
+  ]
+}

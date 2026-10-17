@@ -1,0 +1,55 @@
+{
+  "description": "The identify request: everything Rails is allowed to know about the original WebSocket request. The browser cannot submit any of it - the URL, origin, and client address are reconstructed from validated metadata, and only allowlisted headers are forwarded.",
+  "cases": [
+    {
+      "name": "identify_request",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1000,\"connection\":{\"url\":\"/cable?tab=1\",\"origin\":\"https://app.example\",\"client_address\":\"203.0.113.7\",\"headers\":{\"cookie\":\"_session=abc\"},\"identity\":{},\"state\":{}}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "expected_revision": 0,
+        "deadline_ms": 1000,
+        "connection": {
+          "url": "/cable?tab=1",
+          "origin": "https://app.example",
+          "client_address": "203.0.113.7",
+          "headers": { "cookie": "_session=abc" }
+        }
+      }
+    },
+    {
+      "name": "identify_request_without_origin",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1000,\"connection\":{\"url\":\"/cable\",\"origin\":null,\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "expected_revision": 0,
+        "deadline_ms": 1000,
+        "connection": {
+          "url": "/cable",
+          "origin": null,
+          "client_address": "203.0.113.7",
+          "headers": {}
+        }
+      }
+    }
+  ]
+}

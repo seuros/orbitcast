@@ -1,0 +1,103 @@
+{
+  "description": "Server-to-client presence messages, as they appear in the `message` body of an ordinary addressed ActionCable frame. Join and leave are subject-level transitions - one join however many tabs a subject has, one leave after the last one goes - and a snapshot is one bounded, stable-ordered roster page.",
+  "cases": [
+    {
+      "name": "join_with_public_metadata",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"join\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\",\"metadata\":{\"name\":\"Marissa\"},\"total\":3}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "join",
+        "stream": "chat:42",
+        "subject_id": "user:7",
+        "metadata": { "name": "Marissa" },
+        "total": 3,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "leave_carries_no_metadata",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"leave\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\",\"total\":2}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "leave",
+        "stream": "chat:42",
+        "subject_id": "user:7",
+        "total": 2,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "snapshot_page",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"snapshot\",\"stream\":\"chat:42\",\"total\":7,\"members\":[{\"subject_id\":\"user:1\",\"metadata\":{}},{\"subject_id\":\"user:2\",\"metadata\":{\"tz\":\"UTC\"}}],\"page\":{\"limit\":2,\"offset\":0,\"has_more\":true}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "snapshot",
+        "stream": "chat:42",
+        "total": 7,
+        "member_subjects": ["user:1", "user:2"],
+        "page": { "limit": 2, "offset": 0, "has_more": true }
+      }
+    },
+    {
+      "name": "empty_snapshot_of_an_empty_roster",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"snapshot\",\"stream\":\"chat:42\",\"total\":0,\"page\":{\"limit\":50,\"offset\":0,\"has_more\":false}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "snapshot",
+        "stream": "chat:42",
+        "total": 0,
+        "member_subjects": [],
+        "page": { "limit": 50, "offset": 0, "has_more": false }
+      }
+    },
+    {
+      "name": "message_from_an_older_peer_without_a_version",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"type\":\"presence\",\"event\":\"leave\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\",\"total\":0}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "leave",
+        "stream": "chat:42",
+        "subject_id": "user:7",
+        "total": 0,
+        "member_subjects": []
+      }
+    },
+    {
+      "name": "message_from_a_newer_peer_with_extra_fields",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"join\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\",\"metadata\":{},\"total\":1,\"server_time\":1760000000,\"node_id\":\"node-7\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "event": "join",
+        "stream": "chat:42",
+        "subject_id": "user:7",
+        "metadata": {},
+        "total": 1,
+        "member_subjects": []
+      }
+    }
+  ]
+}

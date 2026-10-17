@@ -1,3 +1,11 @@
+# release-please: maintains the release PR (CHANGELOG, Cargo.toml version,
+# gem/lib/orbitcast/version.rb via the generic extra-file annotation) and, when
+# a release is cut, calls release.yml with the exact tag.
+#
+# Replaced behavior from the previous version of this file:
+# - release.yml is now invoked directly via workflow_call with the tag; a tag
+#   pushed with GITHUB_TOKEN does not trigger `on: push` workflows, so relying
+#   on the tag event would silently skip the release build.
 name: release-please
 
 on:
@@ -13,9 +21,24 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+      id-token: write # provenance signing (actions/attest-build-provenance) in release.yml
+      attestations: write # actions/attest-build-provenance in release.yml
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}

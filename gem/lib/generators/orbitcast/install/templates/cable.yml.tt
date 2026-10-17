@@ -1,0 +1,48 @@
+# Orbitcast cable configuration.
+#
+# `adapter: orbitcast` selects a publish-only ActionCable adapter: Rails
+# publishes broadcasts through PostgreSQL NOTIFY and the separately supervised
+# Rust relay serves /cable. A local subscribe raises instead of starting a
+# second WebSocket server.
+#
+#   database_url  DSN of the cable database. It may be a dedicated PostgreSQL
+#                 database even when the application itself runs on SQLite or
+#                 MySQL; nothing here converts your primary database.
+#                 The relay's listener needs a real session (direct connection
+#                 or session pooling) — never PgBouncer transaction pooling.
+#   namespace     Scopes every NOTIFY channel and every publication envelope.
+#                 Two deployments sharing one database MUST use different
+#                 namespaces, and isolated namespaces need distinct Turbo keys.
+#   publish_via   postgres (default). The alternative, http, publishes to
+#                 the relay's private ingress instead of PostgreSQL and
+#                 needs ingress_url + ingress_token.
+#   connection    pool (default): a dedicated pg pool for database_url.
+#                 active_record: publish on the application's Active Record
+#                 connection so a broadcast joins (and rolls back with) the
+#                 surrounding transaction; the cable database must then be
+#                 the application's primary database.
+#   overflow_enabled  Relay payloads above the NOTIFY limit through the
+#                 orbitcast_payloads table (needs the --overflow migration).
+
+development:
+  adapter: orbitcast
+  database_url: <%%= ENV.fetch("ORBITCAST_DATABASE_URL", "postgres://localhost/<%= application_namespace %>_cable_development") %>
+  namespace: "<%= application_namespace %>_development"
+  publish_via: postgres
+<% if overflow? -%>
+  overflow_enabled: true
+<% end -%>
+
+# Rails' in-process test adapter keeps application tests isolated; Orbitcast's
+# real publication path is covered by integration tests against a live database.
+test:
+  adapter: test
+
+production:
+  adapter: orbitcast
+  database_url: <%%= ENV.fetch("ORBITCAST_DATABASE_URL") %>
+  namespace: "<%= application_namespace %>_production"
+  publish_via: postgres
+<% if overflow? -%>
+  overflow_enabled: true
+<% end -%>

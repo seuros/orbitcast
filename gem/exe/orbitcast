@@ -1,0 +1,11 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Thin wrapper around the vendored Orbitcast executable.
+#
+# Only the launcher is loaded here. `require "orbitcast"` would mark the gem as
+# loaded before `Bundler.require` runs inside a Rails boot, which would skip
+# `Orbitcast::Engine` registration entirely.
+require "orbitcast/launcher"
+
+Orbitcast::Launcher.call(ARGV)

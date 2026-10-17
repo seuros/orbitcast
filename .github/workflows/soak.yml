@@ -1,0 +1,72 @@
+# Soak / chaos: a long fanout run against a real PostgreSQL that is restarted
+# mid-run (bench/soak.sh). Asserts from /metrics that the relay reconnected
+# its listener, re-LISTENed every interested stream (publications keep
+# arriving after the restart), and returned to its idle connection /
+# subscription / interest counts afterwards: repeated churn leaves no
+# growing stream/task/backend-subscription count.
+#
+# Not a benchmark: the numbers it prints are one run on a shared runner and
+# are never recorded as baselines.
+name: Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_secs:
+        description: "Fanout duration in seconds (the database restarts halfway)"
+        required: false
+        default: "300"
+        type: string
+      clients:
+        description: "Subscribed WebSocket clients"
+        required: false
+        default: "200"
+        type: string
+      streams:
+        description: "Streams the clients and publications are spread over"
+        required: false
+        default: "4"
+        type: string
+  schedule:
+    # Weekly, Monday 04:00 UTC.
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak:
+    name: Fanout soak with PostgreSQL restart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (mise.toml)
+        uses: jdx/mise-action@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            bench -> bench/target
+
+      - name: Soak
+        env:
+          DURATION_SECS: ${{ inputs.duration_secs || '300' }}
+          CLIENTS: ${{ inputs.clients || '200' }}
+          STREAMS: ${{ inputs.streams || '4' }}
+          SOAK_LOG_DIR: ${{ runner.temp }}/soak
+        run: bench/soak.sh
+
+      - name: Upload relay/generator logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-logs
+          path: ${{ runner.temp }}/soak
+          if-no-files-found: ignore

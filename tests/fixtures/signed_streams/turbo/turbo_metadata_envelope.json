@@ -1,0 +1,75 @@
+{
+  "description": "REAL ActiveSupport::MessageVerifier output signed with the Turbo verifier key but wrapped in the `_rails` metadata envelope (purpose and/or expiry). Turbo::StreamsChannel never produces these, and the relay's Turbo profile implements no metadata, so it must reject them: expect.stream is null and expect.rejected is true (expect.turbo_rails_verified records what Rails' own verifier would say). The signature IS valid — the rejection is about the payload shape, not the HMAC.",
+  "producer": {
+    "script": "gem/test/dummy/script/export_turbo_stream_fixtures.rb",
+    "turbo_rails_version": "2.0.23",
+    "rails_version": "8.1.3.1",
+    "verifier": "ActiveSupport::MessageVerifier.new(key, digest: \"SHA256\", serializer: JSON)",
+    "key_source": "Rails.application.key_generator.generate_key(\"turbo/signed_stream_verifier_key\") in a real application; pinned raw bytes here",
+    "envelope": "ActiveSupport::Messages::Metadata — {\"_rails\":{\"data\":...,\"exp\":...,\"pur\":...}}"
+  },
+  "rust_contract": {
+    "key": "base64-decode input.key_base64 to raw bytes; key it into SecretBytes/MessageVerifier",
+    "reject": "MessageVerifier::new(key).verify(input.signed_stream_name) must be Err (the payload is not a JSON string); StreamsController.resolve(input.identifier) must not yield a stream",
+    "signature": "HMAC-SHA256(key, expect.encoded_payload) == expect.signature still holds: a verifier that rejects on signature here is rejecting for the wrong reason",
+    "mismatch_rule": "a case with \"rust_status\": \"mismatch\" documents real turbo-rails output the current verifier does NOT accept; assert the documented rejection, do not silently loosen the verifier"
+  },
+  "cases": [
+    {
+      "name": "purpose_metadata_envelope",
+      "description": "MessageVerifier#generate(\"demo\", purpose: :orbitcast_fixture): the payload is a {\"_rails\":{...}} object, not a JSON string. Correctly signed with the Turbo key, and still not a stream name.",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "string",
+          "value": "demo",
+          "purpose": "orbitcast_fixture"
+        },
+        "signed_stream_name": "eyJfcmFpbHMiOnsiZGF0YSI6ImRlbW8iLCJwdXIiOiJvcmJpdGNhc3RfZml4dHVyZSJ9fQ==--9dc51c1bd6ef8221356935b61c9dfbe9fa89727548755de5fde205bedc0b2bfc",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"eyJfcmFpbHMiOnsiZGF0YSI6ImRlbW8iLCJwdXIiOiJvcmJpdGNhc3RfZml4dHVyZSJ9fQ==--9dc51c1bd6ef8221356935b61c9dfbe9fa89727548755de5fde205bedc0b2bfc\"}"
+      },
+      "expect": {
+        "stream": null,
+        "rejected": true,
+        "error_kind": "metadata_envelope",
+        "turbo_rails_verified": null,
+        "encoded_payload": "eyJfcmFpbHMiOnsiZGF0YSI6ImRlbW8iLCJwdXIiOiJvcmJpdGNhc3RfZml4dHVyZSJ9fQ==",
+        "payload_json": "{\"_rails\":{\"data\":\"demo\",\"pur\":\"orbitcast_fixture\"}}",
+        "signature": "9dc51c1bd6ef8221356935b61c9dfbe9fa89727548755de5fde205bedc0b2bfc",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": true,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    },
+    {
+      "name": "expiry_metadata_envelope",
+      "description": "MessageVerifier#generate(\"demo\", expires_at: 2100-01-01T00:00:00Z): an unexpired envelope with no purpose. turbo-rails' verifier unwraps it to \"demo\" (turbo_rails_verified), but Turbo::StreamsChannel never emits it and the relay implements no metadata: still an object, still rejected — the Turbo profile carries no expiry claim and must not grow one by accident.",
+      "input": {
+        "key_base64": "AP8QgHR1cmJvLWZpeHR1cmUta2V5LTMyLWJ5dGVzLTA=",
+        "stream_arg": {
+          "kind": "string",
+          "value": "demo",
+          "expires_at": "2100-01-01T00:00:00Z"
+        },
+        "signed_stream_name": "eyJfcmFpbHMiOnsiZGF0YSI6ImRlbW8iLCJleHAiOiIyMTAwLTAxLTAxVDAwOjAwOjAwLjAwMFoifX0=--e9acfd89b2de1ffd59f7b7803c59432f142a4bcf5c93dace9fd08e8dfe6c7492",
+        "identifier": "{\"channel\":\"Turbo::StreamsChannel\",\"signed_stream_name\":\"eyJfcmFpbHMiOnsiZGF0YSI6ImRlbW8iLCJleHAiOiIyMTAwLTAxLTAxVDAwOjAwOjAwLjAwMFoifX0=--e9acfd89b2de1ffd59f7b7803c59432f142a4bcf5c93dace9fd08e8dfe6c7492\"}"
+      },
+      "expect": {
+        "stream": null,
+        "rejected": true,
+        "error_kind": "metadata_envelope",
+        "turbo_rails_verified": "demo",
+        "encoded_payload": "eyJfcmFpbHMiOnsiZGF0YSI6ImRlbW8iLCJleHAiOiIyMTAwLTAxLTAxVDAwOjAwOjAwLjAwMFoifX0=",
+        "payload_json": "{\"_rails\":{\"data\":\"demo\",\"exp\":\"2100-01-01T00:00:00.000Z\"}}",
+        "signature": "e9acfd89b2de1ffd59f7b7803c59432f142a4bcf5c93dace9fd08e8dfe6c7492",
+        "signature_digest": "SHA256",
+        "base64_alphabet": "standard",
+        "base64_padded": true,
+        "serializer": "JSON"
+      },
+      "rust_status": "match"
+    }
+  ]
+}

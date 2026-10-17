@@ -1,64 +1,114 @@
-//! In-memory pub/sub backend using tokio::sync::broadcast
+//! In-process pub/sub backend.
 //!
-//! Single-node only. No cross-process coordination.
-//! Ideal for development and single-instance deployments.
+//! Single node, single process: development, tests, and deployments that accept
+//! no cross-node delivery. There is no wire format here - publications never
+//! leave the process - but the same v1 semantic validation is applied to the
+//! stream name and the JSON payload text, so a payload that memory mode accepts
+//! is one PostgreSQL mode would also accept.
+//!
+//! # Event-driven delivery
+//!
+//! Publishing sends into one bounded queue that [`PubSub::listen`] drains; there
+//! is no polling, no `try_recv` scan, and no sleep. The queue is created with
+//! the backend, so an acknowledged [`PubSub::subscribe`] always already has a
+//! live receiver: a publish issued immediately after `subscribe` returns is
+//! delivered.
+//!
+//! A single queue also gives one total delivery order across streams, which
+//! matches the per-connection ordering a PostgreSQL listener session provides.
+//!
+//! # Drop policy
+//!
+//! The queue is bounded. When it is full the publication is dropped, counted in
+//! [`PubSubStats`], and logged at `warn` - the same policy as the PostgreSQL
+//! backend, for the same reason: a publisher must never be able to stall the
+//! delivery task.
 
-use crate::pubsub::PubSub;
-use async_trait::async_trait;
-use dashmap::DashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
 
-/// Default buffer size for broadcast channels
-const DEFAULT_BUFFER_SIZE: usize = 1024;
+use async_trait::async_trait;
+use bytes::Bytes;
+use dashmap::DashSet;
+use tokio::sync::{Mutex, mpsc};
+use tracing::{debug, warn};
 
-/// In-memory pub/sub using tokio::sync::broadcast
-///
-/// Each stream gets its own broadcast channel. Messages are delivered
-/// to all subscribers immediately with no persistence.
+use crate::protocol::v1::publication::Publication;
+use crate::protocol::v1::{validate_json_text, validate_stream};
+use crate::pubsub::{
+    DEFAULT_QUEUE_CAPACITY, EventHandler, PubSub, PubSubError, PubSubEvent, PubSubStats,
+    StatsSnapshot,
+};
+
+/// One publication on its way to the hub.
+struct Delivery {
+    stream: String,
+    payload: Bytes,
+}
+
+/// In-process pub/sub.
 ///
 /// # Limitations
-/// - Single-process only
-/// - No message persistence
-/// - Lagging receivers lose messages
+/// - single process: no cross-node delivery, no persistence
+/// - a publication for a stream with no local interest is discarded, exactly as
+///   PostgreSQL discards a `NOTIFY` nobody is listening for
 pub struct MemoryPubSub {
-    channels: Arc<DashMap<String, broadcast::Sender<Vec<u8>>>>,
-    subscriptions: Arc<RwLock<HashSet<String>>>,
-    buffer_size: usize,
+    subscriptions: Arc<DashSet<String>>,
+    deliveries: mpsc::Sender<Delivery>,
+    receiver: Mutex<Option<mpsc::Receiver<Delivery>>>,
+    stats: Arc<PubSubStats>,
 }
 
 impl MemoryPubSub {
-    /// Create a new in-memory pub/sub backend
-    ///
-    /// # Example
-    /// ```ignore
-    /// use crate::pubsub::MemoryPubSub;
-    ///
-    /// let pubsub = MemoryPubSub::new();
-    /// ```
+    /// Create an in-process backend with the default queue bound.
+    #[must_use]
     pub fn new() -> Self {
-        Self::with_buffer_size(DEFAULT_BUFFER_SIZE)
+        Self::with_capacity(DEFAULT_QUEUE_CAPACITY)
     }
 
-    /// Create with custom buffer size
+    /// Create an in-process backend with an explicit queue bound.
     ///
-    /// Larger buffers reduce message loss for slow receivers
-    /// but consume more memory.
-    pub fn with_buffer_size(buffer_size: usize) -> Self {
+    /// # Panics
+    /// Panics if `capacity` is zero; a zero-capacity queue could never deliver.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0, "memory pub/sub queue capacity must be greater than 0");
+        let (deliveries, receiver) = mpsc::channel(capacity);
         Self {
-            channels: Arc::new(DashMap::new()),
-            subscriptions: Arc::new(RwLock::new(HashSet::new())),
-            buffer_size,
+            subscriptions: Arc::new(DashSet::new()),
+            deliveries,
+            receiver: Mutex::new(Some(receiver)),
+            stats: Arc::new(PubSubStats::default()),
         }
     }
 
-    /// Get or create a broadcast channel for a stream
-    fn get_or_create_channel(&self, stream: &str) -> broadcast::Sender<Vec<u8>> {
-        self.channels
-            .entry(stream.to_string())
-            .or_insert_with(|| broadcast::channel(self.buffer_size).0)
-            .clone()
+    /// Whether this node currently holds interest in `stream`.
+    pub fn is_subscribed(&self, stream: &str) -> bool {
+        self.subscriptions.contains(stream)
+    }
+
+    /// Hand one validated delivery to the queue, counting a full queue.
+    fn enqueue(&self, stream: &str, json_payload: &str) {
+        if !self.subscriptions.contains(stream) {
+            debug!(stream = %stream, "No local interest; publication discarded");
+            return;
+        }
+
+        let delivery = Delivery {
+            stream: stream.to_string(),
+            payload: Bytes::copy_from_slice(json_payload.as_bytes()),
+        };
+
+        match self.deliveries.try_send(delivery) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
+                self.stats.record_delivery_drop();
+                warn!(stream = %dropped.stream, "Delivery queue full; dropping publication");
+            }
+            Err(mpsc::error::TrySendError::Closed(dropped)) => {
+                self.stats.record_delivery_drop();
+                debug!(stream = %dropped.stream, "No delivery consumer; dropping publication");
+            }
+        }
     }
 }
 
@@ -70,166 +120,58 @@ impl Default for MemoryPubSub {
 
 #[async_trait]
 impl PubSub for MemoryPubSub {
-    async fn publish(&self, stream: &str, payload: &[u8]) -> anyhow::Result<()> {
-        let tx = self.get_or_create_channel(stream);
-
-        // send() returns Err only if there are no receivers
-        // This is fine - fire and forget semantics
-        let _ = tx.send(payload.to_vec());
-
+    async fn publish(&self, stream: &str, json_payload: &str) -> Result<(), PubSubError> {
+        validate_stream(stream)?;
+        validate_json_text("json_payload", json_payload)?;
+        self.enqueue(stream, json_payload);
         Ok(())
     }
 
-    async fn subscribe(&self, stream: &str) -> anyhow::Result<()> {
-        // Ensure channel exists
-        self.get_or_create_channel(stream);
-
-        let mut subs = self.subscriptions.write().await;
-        subs.insert(stream.to_string());
-
+    async fn publish_publication(&self, publication: &Publication) -> Result<(), PubSubError> {
+        // In-process delivery has no envelope: the namespace and id go
+        // nowhere, but the same semantic checks apply so memory mode accepts
+        // exactly what PostgreSQL mode would.
+        validate_stream(&publication.stream)?;
+        validate_json_text("json_payload", &publication.json_payload)?;
+        self.enqueue(&publication.stream, &publication.json_payload);
         Ok(())
     }
 
-    async fn unsubscribe(&self, stream: &str) -> anyhow::Result<()> {
-        let mut subs = self.subscriptions.write().await;
-        subs.remove(stream);
+    async fn subscribe(&self, stream: &str) -> Result<(), PubSubError> {
+        validate_stream(stream)?;
+        // The receiver exists from construction, so interest is live the moment
+        // this returns - no window where a confirmed subscription has no reader.
+        self.subscriptions.insert(stream.to_string());
+        Ok(())
+    }
 
-        // Cleanup channel if no more subscribers
-        if let Some(entry) = self.channels.get(stream)
-            && entry.receiver_count() == 0
-        {
-            drop(entry);
-            self.channels.remove(stream);
+    async fn unsubscribe(&self, stream: &str) -> Result<(), PubSubError> {
+        self.subscriptions.remove(stream);
+        Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn stats(&self) -> StatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    async fn listen(&self, on_event: EventHandler) -> Result<(), PubSubError> {
+        let mut deliveries =
+            self.receiver.lock().await.take().ok_or(PubSubError::ListenerAlreadyStarted)?;
+
+        while let Some(delivery) = deliveries.recv().await {
+            on_event(PubSubEvent::Publication {
+                stream: delivery.stream,
+                payload: delivery.payload,
+            });
         }
 
         Ok(())
-    }
-
-    async fn listen<F>(&self, callback: F) -> anyhow::Result<()>
-    where
-        F: Fn(String, Vec<u8>) + Send + Sync + 'static,
-    {
-        let callback = Arc::new(callback);
-        let channels = self.channels.clone();
-        let subscriptions = self.subscriptions.clone();
-
-        // Track active receivers per channel
-        let mut receivers: std::collections::HashMap<String, broadcast::Receiver<Vec<u8>>> =
-            std::collections::HashMap::new();
-
-        loop {
-            // Sync receivers with current subscriptions
-            {
-                let subs = subscriptions.read().await;
-
-                // Add new subscriptions
-                for stream in subs.iter() {
-                    if !receivers.contains_key(stream)
-                        && let Some(tx) = channels.get(stream)
-                    {
-                        receivers.insert(stream.clone(), tx.subscribe());
-                    }
-                }
-
-                // Remove stale subscriptions
-                receivers.retain(|stream, _| subs.contains(stream));
-            }
-
-            if receivers.is_empty() {
-                // No subscriptions, wait a bit before checking again
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
-            }
-
-            // Poll all receivers
-            // Using a simple round-robin approach with timeout
-            let mut received_any = false;
-
-            for (stream, rx) in receivers.iter_mut() {
-                match rx.try_recv() {
-                    Ok(payload) => {
-                        callback(stream.clone(), payload);
-                        received_any = true;
-                    }
-                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                        tracing::warn!("Receiver lagged, lost {} messages on stream {}", n, stream);
-                        // Continue receiving from current position
-                    }
-                    Err(broadcast::error::TryRecvError::Empty) => {
-                        // No messages available
-                    }
-                    Err(broadcast::error::TryRecvError::Closed) => {
-                        // Channel closed, will be cleaned up on next sync
-                    }
-                }
-            }
-
-            if !received_any {
-                // Yield to prevent busy-spinning
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-            }
-        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn test_publish_subscribe() {
-        let pubsub = MemoryPubSub::new();
-        let received = Arc::new(AtomicUsize::new(0));
-        let received_clone = received.clone();
-
-        pubsub.subscribe("test").await.unwrap();
-
-        // Spawn listener
-        let pubsub_clone = MemoryPubSub {
-            channels: pubsub.channels.clone(),
-            subscriptions: pubsub.subscriptions.clone(),
-            buffer_size: pubsub.buffer_size,
-        };
-
-        let handle = tokio::spawn(async move {
-            let _ = pubsub_clone
-                .listen(move |_stream, _payload| {
-                    received_clone.fetch_add(1, Ordering::SeqCst);
-                })
-                .await;
-        });
-
-        // Give listener time to start
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Publish messages
-        pubsub.publish("test", b"hello").await.unwrap();
-        pubsub.publish("test", b"world").await.unwrap();
-
-        // Give time to receive
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert_eq!(received.load(Ordering::SeqCst), 2);
-
-        handle.abort();
-    }
-
-    #[tokio::test]
-    async fn test_unsubscribe() {
-        let pubsub = MemoryPubSub::new();
-
-        pubsub.subscribe("test").await.unwrap();
-        assert!(pubsub.subscriptions.read().await.contains("test"));
-
-        pubsub.unsubscribe("test").await.unwrap();
-        assert!(!pubsub.subscriptions.read().await.contains("test"));
-    }
-
-    #[test]
-    fn test_default() {
-        let pubsub = MemoryPubSub::default();
-        assert_eq!(pubsub.buffer_size, DEFAULT_BUFFER_SIZE);
-    }
-}
+mod tests;

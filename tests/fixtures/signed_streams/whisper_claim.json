@@ -1,0 +1,70 @@
+{
+  "description": "The optional whisper capability: signed read access does not grant publication. A token carrying whisper: true grants whisper on its stream and nothing else; a plain token (no whisper claim) grants none. Copying the claim onto a token signed without it breaks that token's signature.",
+  "cases": [
+    {
+      "name": "whisper_granted",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDAsIndoaXNwZXIiOnRydWV9--ae540debbce9414e3fe8bc9b54e22d8cd9d2c9e7b4244717e7ce8c69cdb8a5b3",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800,
+          "whisper": true
+        },
+        "stream": "chat:42"
+      }
+    },
+    {
+      "name": "plain_token_grants_no_whisper",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--ba7637287a948eea5865b506a7601ec94c8f08b7473dd80785d70f479db227b7",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        },
+        "stream": "chat:42"
+      }
+    },
+    {
+      "name": "whisper_spliced_onto_a_read_only_signature",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDAsIndoaXNwZXIiOnRydWV9--ba7637287a948eea5865b506a7601ec94c8f08b7473dd80785d70f479db227b7",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": false,
+        "claims_valid": true,
+        "error_kind": "bad_signature",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800,
+          "whisper": true
+        }
+      }
+    }
+  ]
+}

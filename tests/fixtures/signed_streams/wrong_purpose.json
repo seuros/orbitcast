@@ -1,0 +1,26 @@
+{
+  "description": "Correctly signed token whose purpose is not \"subscribe\". A subscribe verifier must reject it; signed read access never widens into another purpose.",
+  "cases": [
+    {
+      "name": "purpose_publish",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InB1Ymxpc2giLCJleHBpcmVzX2F0Ijo0MTAyNDQ0ODAwfQ==--0036f11679dd8b86a33fc9c5fcc664ea7906a5698afea6825949c4e58b16315e",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "wrong_purpose",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "publish",
+          "expires_at": 4102444800
+        }
+      }
+    }
+  ]
+}

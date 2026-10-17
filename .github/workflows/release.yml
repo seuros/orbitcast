@@ -1,132 +1,419 @@
+# Release: build the five native-gem platforms for an EXISTING release-please
+# tag, smoke-test every packaged gem on a fresh machine of its own platform
+# (offline install, binary floor inspection, real WebSocket + PostgreSQL round
+# trip on Linux, fail-closed start on macOS), verify version lockstep, attest
+# provenance, attach a CycloneDX SBOM, and attach the gems + binaries +
+# SHA256SUMS to the GitHub release. Pushing to rubygems.org is `rake
+# gems:push`, by hand (tasks/release.rake).
+#
+# Invocation:
+# - workflow_call from release-please.yml with the exact tag it created.
+# - workflow_dispatch as a partial-release RETRY only: the tag must already
+#   exist; the verify-tag job refuses anything else. It is not a way to
+#   release an arbitrary version label from the current checkout.
+#
+# Idempotency: a rebuild is
+# not bit-identical, so already-attached GitHub release assets are left
+# untouched on a retry. Provenance is re-attested for the rebuilt bytes;
+# attestations are append-only.
+#
+# Platform floors (tasks/native.rake): *-linux-gnu gems are cross-linked
+# against glibc 2.34 with cargo-zigbuild so the floor is a build input rather
+# than whatever glibc the runner image ships (ubuntu-24.04 = 2.39); Darwin
+# gems export MACOSX_DEPLOYMENT_TARGET=13.0. The smoke jobs assert both from
+# the binary itself.
 name: Release
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Exact release tag created by release-please (e.g. v0.3.0)"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version (e.g., 0.1.0)'
+      tag:
+        description: "EXISTING release tag to retry (e.g. v0.3.0); refused if the tag does not exist"
         required: true
         type: string
 
 permissions:
   contents: write
+  id-token: write # provenance signing (actions/attest-build-provenance)
+  attestations: write # actions/attest-build-provenance
+
+env:
+  CARGO_TERM_COLOR: always
+  # cargo-zigbuild from PyPI bundles a matching Zig; pinned to the version the
+  # glibc floor was verified with (tasks/native.rake).
+  CARGO_ZIGBUILD_VERSION: "0.23.4"
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
+  verify-tag:
+    name: Verify tag exists
+    runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-      - id: version
-        run: echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@v7
         with:
-          tag_name: v${{ inputs.version }}
-          draft: true
-          generate_release_notes: true
+          fetch-depth: 0
+
+      - name: Refuse unknown tags
+        id: check
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          git fetch --tags --force --quiet
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::tag '${TAG}' does not exist; this workflow only builds existing release-please tags"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: create-release
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.platform }}
+    needs: verify-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        # Platform table. Keep in lockstep with PLATFORM_TARGETS in
+        # tasks/native.rake. `builder` is the native:build second argument.
+        include:
+          - platform: arm64-darwin
+            target: aarch64-apple-darwin
+            os: macos-14
+            builder: build
+          - platform: x86_64-darwin
+            target: x86_64-apple-darwin
+            # macos-13 Intel runners are retired; macos-15-intel is the
+            # remaining Intel image. The macOS 13 floor is a build input
+            # (MACOSX_DEPLOYMENT_TARGET in native:build), not a runner label.
+            os: macos-15-intel
+            builder: build
+          - platform: x86_64-linux-gnu
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            builder: zigbuild
+          - platform: aarch64-linux-gnu
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            builder: zigbuild
+          - platform: x86_64-linux-musl
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            builder: build
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag }}
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain (${{ steps.toolchain.outputs.channel }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.target }}
+
+      # native-tls is built with its `vendored` feature (see Cargo.toml), so
+      # openssl-sys compiles OpenSSL from source with musl-gcc: the musl binary
+      # is fully static and never links a host OpenSSL.
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # glibc floor: cargo-zigbuild links against the declared glibc version
+      # (zig ships the stubs), with vendored OpenSSL compiled by `zig cc`.
+      - name: Install cargo-zigbuild + Zig
+        if: matrix.builder == 'zigbuild'
+        # pipx (preinstalled on the Ubuntu runners) rather than pip: the
+        # runner's system Python is PEP 668 "externally managed".
+        run: |
+          pipx install "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cargo-zigbuild" --version
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}-${{ matrix.builder }}
+
+      - name: Build (cargo ${{ matrix.builder }}, --locked --release)
+        run: rake "native:build[${{ matrix.target }},${{ matrix.builder }}]"
+
+      - name: Package platform gem
+        run: rake "native:package[${{ matrix.platform }}]"
+
+      - name: Archive standalone binary
+        env:
+          TAG: ${{ needs.verify-tag.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          # shellcheck disable=SC2016 # $stdin is Ruby, not shell
+          bindir="$(cargo metadata --format-version=1 --no-deps --offline | ruby -rjson -e 'puts JSON.parse($stdin.read)["target_directory"]')"
+          cp "${bindir}/${TARGET}/release/orbitcast" dist/orbitcast
+          tar czf "dist/orbitcast-${TAG}-${TARGET}.tar.gz" -C dist orbitcast
+          rm dist/orbitcast
+
+      - name: Upload gem artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gem-${{ matrix.platform }}
+          path: pkg/*.gem
+          if-no-files-found: error
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # Smoke on a FRESH runner that never built anything: the gem is downloaded
+  # and installed offline, exactly as a deployment would. macOS has no
+  # PostgreSQL service, so it runs the no-database variant: the relay must
+  # refuse to start (invariant 7) rather than idle unready.
+  smoke-macos:
+    name: Smoke ${{ matrix.platform }}
+    needs: [verify-tag, build]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            archive: tar.gz
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            archive: tar.gz
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            archive: tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: tar.gz
+          - platform: arm64-darwin
+            os: macos-14
+          - platform: x86_64-darwin
+            os: macos-15-intel
     runs-on: ${{ matrix.os }}
+    env:
+      SMOKE_REQUIRE_DOCTOR: "1"
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
         with:
-          targets: ${{ matrix.target }}
+          ref: ${{ needs.verify-tag.outputs.tag }}
 
-      - name: Install protobuf compiler (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
 
-      - name: Install protobuf compiler (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
+      - name: Download gem
+        uses: actions/download-artifact@v8
+        with:
+          name: gem-${{ matrix.platform }}
+          path: pkg
 
-      - name: Install musl tools (Linux)
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Smoke (offline install, otool, --version, doctor, fail-closed start)
+        run: rake "native:smoke[${{ matrix.platform }}]"
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --features postgres
+  # Linux GNU: offline install, glibc symbol floor + ldd inspection, then the
+  # full WebSocket + pg_notify + SIGTERM round trip against PostgreSQL 18.
+  smoke-linux-gnu:
+    name: Smoke ${{ matrix.platform }}
+    needs: [verify-tag, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux-gnu
+            os: ubuntu-24.04
+          - platform: aarch64-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: orbitcast
+          POSTGRES_PASSWORD: orbitcast
+          POSTGRES_DB: orbitcast_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SMOKE_DATABASE_URL: postgres://orbitcast:orbitcast@localhost:5432/orbitcast_smoke
+      SMOKE_REQUIRE_DOCTOR: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag }}
 
-      - name: Package (Unix)
-        if: matrix.archive == 'tar.gz'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+
+      # Pre-provisioned native prerequisites: the pg gem and the
+      # binutils the floor inspection uses. Everything after this step is
+      # offline for RubyGems (`gem install --local`).
+      - name: Provision pg + binutils
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/orbitcast dist/orbitcast
-          tar czvf orbitcast-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz -C dist orbitcast
+          sudo apt-get update && sudo apt-get install -y libpq-dev binutils
+          gem install pg --no-document
 
-      - uses: softprops/action-gh-release@v2
+      - name: Download gem
+        uses: actions/download-artifact@v8
         with:
-          tag_name: v${{ inputs.version }}
-          draft: true
-          files: orbitcast-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+          name: gem-${{ matrix.platform }}
+          path: pkg
 
-  build-freebsd:
-    needs: create-release
-    name: Build x86_64-unknown-freebsd
-    runs-on: ubuntu-latest
+      - name: Smoke (offline install, glibc floor, ldd, --version, doctor, WS + pg_notify + SIGTERM)
+        run: rake "native:smoke[${{ matrix.platform }}]"
+
+  # musl: actual Alpine execution. The container reaches the
+  # PostgreSQL service through the host network. Additionally proves that the
+  # x86_64-linux-gnu gem is REFUSED on Alpine — a missing musl artifact must
+  # never select a GNU binary.
+  smoke-alpine:
+    name: Smoke x86_64-linux-musl (Alpine)
+    needs: [verify-tag, build]
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: orbitcast
+          POSTGRES_PASSWORD: orbitcast
+          POSTGRES_DB: orbitcast_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: cross-platform-actions/action@v0.32.0
+      - uses: actions/checkout@v7
         with:
-          operating_system: freebsd
-          version: '15.0'
-          run: |
-            sudo pkg install -y protobuf
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            . $HOME/.cargo/env
-            cargo build --release --features postgres
-            mkdir -p dist
-            cp target/release/orbitcast dist/orbitcast-x86_64-unknown-freebsd
-            tar czvf orbitcast-v${{ needs.create-release.outputs.version }}-x86_64-unknown-freebsd.tar.gz -C dist orbitcast-x86_64-unknown-freebsd
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ inputs.version }}
-          draft: true
-          files: orbitcast-v${{ needs.create-release.outputs.version }}-x86_64-unknown-freebsd.tar.gz
+          ref: ${{ needs.verify-tag.outputs.tag }}
 
-  checksums:
-    needs: [build, build-freebsd]
-    runs-on: ubuntu-latest
+      - name: Download musl + gnu gems
+        uses: actions/download-artifact@v8
+        with:
+          pattern: gem-x86_64-linux-*
+          path: pkg
+          merge-multiple: true
+
+      - name: Smoke inside Alpine (offline install, static binary, WS + pg_notify + SIGTERM, GNU gem refused)
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          docker run --rm --network host \
+            -v "$PWD:/work:ro" -w /work \
+            -e "VERSION=${VERSION}" \
+            -e SMOKE_DATABASE_URL=postgres://orbitcast:orbitcast@127.0.0.1:5432/orbitcast_smoke \
+            -e SMOKE_REQUIRE_DOCTOR=1 \
+            ruby:4.0-alpine sh -ec '
+              # Pre-provision native prerequisites, then everything is --local.
+              apk add --no-cache build-base postgresql-dev binutils >/dev/null
+              gem install pg --no-document >/dev/null
+              ruby tasks/smoke/run.rb \
+                --gem "pkg/orbitcast-${VERSION}-x86_64-linux-musl.gem" \
+                --platform x86_64-linux-musl \
+                --target x86_64-unknown-linux-musl \
+                --expect-version "${VERSION}" \
+                --refuse-gem "pkg/orbitcast-${VERSION}-x86_64-linux-gnu.gem"
+            '
+
+  publish:
+    name: Verify and attach to release
+    needs: [verify-tag, build, smoke-macos, smoke-linux-gnu, smoke-alpine]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag }}
 
-      - name: Download release assets
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+
+      - name: Download gem artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: gem-*
+          path: pkg
+          merge-multiple: true
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+
+      # Crate version == gem version == tag; every gem carries exactly one
+      # platform binary whose manifest (version, target, features, envelope
+      # versions, toolchain, platform floor) matches; all five platforms
+      # present and on one version.
+      - name: release:verify
+        env:
+          TAG: ${{ needs.verify-tag.outputs.tag }}
+        run: rake release:verify
+
+      # CycloneDX SBOM of the crate's resolved graph (Cargo.lock) plus the
+      # gem's lockfile, attached to the release below. Generated from the
+      # tagged checkout, so a retry reproduces the same component list.
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/orbitcast-${{ needs.verify-tag.outputs.tag }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Build provenance for every artifact that leaves this workflow. Signed
+      # with this job's OIDC identity; verify with
+      #   gh attestation verify <file> --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.cdx.json
+            pkg/*.gem
+
+      - name: Generate SHA256SUMS
+        run: |
+          cp pkg/*.gem dist/
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach artifacts to GitHub release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify-tag.outputs.tag }}
         run: |
-          gh release download v${{ inputs.version }} --pattern 'orbitcast-v${{ inputs.version }}-*' --dir release-assets
-
-      - name: Generate checksums
-        run: |
-          cd release-assets
-          sha256sum * > SHA256SUMS.txt
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ inputs.version }}
-          draft: true
-          files: release-assets/SHA256SUMS.txt
+          # release-please creates the release; recreate only against the
+          # verified tag if it was deleted.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes
+          fi
+          existing="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          for f in dist/*; do
+            name="$(basename "$f")"
+            if printf '%s\n' "$existing" | grep -qxF "$name"; then
+              # A rebuild is not bit-identical: leave published bytes alone.
+              # (On a retry that adds assets, SHA256SUMS and the SBOM from the
+              # first successful publish therefore also stay authoritative.)
+              echo "::warning::asset ${name} already attached to ${TAG} — left untouched"
+            else
+              gh release upload "$TAG" "$f"
+            fi
+          done

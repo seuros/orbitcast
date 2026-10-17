@@ -1,0 +1,39 @@
+{
+  "description": "Tolerant parsing of control messages. Unknown fields are ignored and an absent version reads as 1 - but an absent reconnect policy defaults to `false`, because a control message that fails to say otherwise must end the session rather than invite an immediate reconnect with credentials the application just revoked.",
+  "cases": [
+    {
+      "name": "control_without_version",
+      "input": {
+        "wire": "{\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "disconnect",
+        "namespace": "example_production",
+        "control_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+        "identity_key": "user:7",
+        "reason": "remote",
+        "reconnect": false,
+        "applies_to": "example_production"
+      }
+    },
+    {
+      "name": "control_with_unknown_fields",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\",\"reconnect\":false,\"issued_at\":1760000000,\"future\":{\"a\":[1,2]}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "disconnect",
+        "namespace": "example_production",
+        "control_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+        "identity_key": "user:7",
+        "reason": "remote",
+        "reconnect": false,
+        "applies_to": "example_production"
+      }
+    }
+  ]
+}

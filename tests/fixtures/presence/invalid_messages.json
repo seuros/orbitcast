@@ -1,0 +1,77 @@
+{
+  "description": "Presence messages that must fail closed. An unknown `event` is a hard decode error; a transition without a subject, a message that is not typed `presence`, a snapshot without its page window, and a page carrying more members than it claims are semantic rejections.",
+  "cases": [
+    {
+      "name": "unknown_event",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"vanish\",\"stream\":\"chat:42\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unknown_event" }
+    },
+    {
+      "name": "absent_event",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"stream\":\"chat:42\"}"
+      },
+      "expect": { "valid": false, "error_kind": "wrong_type" }
+    },
+    {
+      "name": "join_without_a_subject",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"join\",\"stream\":\"chat:42\",\"total\":1}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_field" }
+    },
+    {
+      "name": "transition_without_a_stream",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"leave\",\"stream\":\"\",\"subject_id\":\"user:7\"}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_stream" }
+    },
+    {
+      "name": "a_message_that_is_not_typed_presence",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"chat\",\"event\":\"join\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\"}"
+      },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "snapshot_without_a_page_window",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"snapshot\",\"stream\":\"chat:42\",\"total\":1,\"members\":[{\"subject_id\":\"user:1\"}]}"
+      },
+      "expect": { "valid": false, "error_kind": "missing_payload" }
+    },
+    {
+      "name": "snapshot_page_larger_than_its_own_limit",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"snapshot\",\"stream\":\"chat:42\",\"total\":3,\"members\":[{\"subject_id\":\"user:1\"},{\"subject_id\":\"user:2\"},{\"subject_id\":\"user:3\"}],\"page\":{\"limit\":2,\"offset\":0,\"has_more\":false}}"
+      },
+      "expect": { "valid": false, "error_kind": "too_many" }
+    },
+    {
+      "name": "snapshot_member_without_a_subject",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":1,\"type\":\"presence\",\"event\":\"snapshot\",\"stream\":\"chat:42\",\"total\":1,\"members\":[{\"subject_id\":\"\"}],\"page\":{\"limit\":50,\"offset\":0,\"has_more\":false}}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_field" }
+    },
+    {
+      "name": "unsupported_version",
+      "envelope": "message",
+      "input": {
+        "wire": "{\"version\":99,\"type\":\"presence\",\"event\":\"join\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unsupported_version" }
+    }
+  ]
+}

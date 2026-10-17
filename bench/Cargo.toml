@@ -1,0 +1,42 @@
+# The load generator for `bench/*.sh`.
+#
+# Deliberately its own workspace (empty `[workspace]` table) with its own
+# lockfile: it is not part of the OrbitCast build graph, never ships in the
+# gem, and its dependencies must never influence what the relay resolves. The
+# relay's own `Cargo.toml` lists this directory under `workspace.exclude`.
+[workspace]
+
+[package]
+name = "orbitcast-bench"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+license = "BSD-3-Clause"
+description = "Load generator for the OrbitCast benchmark scripts (not published)"
+
+[[bin]]
+name = "orbitcast-bench"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4"] }
+usage-rs = "7"
+
+[profile.release]
+opt-level = 3
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "warn"
+dead_code_pub_in_binary = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

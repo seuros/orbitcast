@@ -1,0 +1,77 @@
+{
+  "description": "Presence commands that must fail closed. An unknown or absent `op` is a hard decode error (never a defaulted operation); a foreign action, an unsupported version, and an out-of-range page window are semantic rejections. None of them is ever forwarded to Rails as an application action.",
+  "cases": [
+    {
+      "name": "unknown_op",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"lurk\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unknown_op" }
+    },
+    {
+      "name": "absent_op",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\"}"
+      },
+      "expect": { "valid": false, "error_kind": "wrong_type" }
+    },
+    {
+      "name": "op_of_the_wrong_type",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":3}"
+      },
+      "expect": { "valid": false, "error_kind": "wrong_type" }
+    },
+    {
+      "name": "a_foreign_action_in_the_presence_envelope",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"speak\",\"op\":\"join\"}"
+      },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "unsupported_version",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":99,\"action\":\"orbitcast_presence\",\"op\":\"join\"}"
+      },
+      "expect": { "valid": false, "error_kind": "unsupported_version" }
+    },
+    {
+      "name": "page_size_above_the_limit",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"snapshot\",\"limit\":101}"
+      },
+      "expect": { "valid": false, "error_kind": "out_of_range" }
+    },
+    {
+      "name": "page_size_of_zero",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"snapshot\",\"limit\":0}"
+      },
+      "expect": { "valid": false, "error_kind": "out_of_range" }
+    },
+    {
+      "name": "page_offset_past_the_deep_paging_ceiling",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"version\":1,\"action\":\"orbitcast_presence\",\"op\":\"snapshot\",\"offset\":100001}"
+      },
+      "expect": { "valid": false, "error_kind": "out_of_range" }
+    },
+    {
+      "name": "malformed_json",
+      "envelope": "command",
+      "input": {
+        "wire": "{\"action\":\"orbitcast_presence\",\"op\":"
+      },
+      "expect": { "valid": false, "error_kind": "malformed_json" }
+    }
+  ]
+}

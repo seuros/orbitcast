@@ -1,0 +1,22 @@
+{
+  "description": "Notices carrying unknown additive fields at both the notice and the publication level. Wire parsing must ignore them (normal serde/JSON tolerance, never deny_unknown_fields) and still validate the known fields.",
+  "cases": [
+    {
+      "name": "inline_with_future_fields",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"inline\",\"publication\":{\"version\":1,\"namespace\":\"example_production\",\"id\":\"4b8e6cb6-56f1-4f3e-9c86-3d1b2f0a7c11\",\"stream\":\"chat:42\",\"json_payload\":\"{\\\"message\\\":\\\"hi\\\"}\",\"published_from\":\"node-7\"},\"region\":\"eu-west-1\",\"future\":{\"a\":[1,2]}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "inline",
+        "publication_version": 1,
+        "namespace": "example_production",
+        "stream": "chat:42",
+        "id": "4b8e6cb6-56f1-4f3e-9c86-3d1b2f0a7c11",
+        "json_payload": "{\"message\":\"hi\"}",
+        "channel": "orbitcast_75ba535bd0c12e8f0990bf756607b4f5ddb148f2e22070e1"
+      }
+    }
+  ]
+}

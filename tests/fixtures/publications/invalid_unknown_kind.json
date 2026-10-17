@@ -1,0 +1,15 @@
+{
+  "description": "A notice with an unknown tagged kind. Unlike unknown fields, an unknown kind is a hard decode error: the consumer cannot know what the notice means, so it must not guess.",
+  "cases": [
+    {
+      "name": "kind_telepathy",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"telepathy\",\"id\":\"0f8d3b62-91a4-4c7e-b25d-6e1a9c4f7d30\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unknown_kind"
+      }
+    }
+  ]
+}

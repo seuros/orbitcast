@@ -1,0 +1,39 @@
+{
+  "description": "Rails-initiated remote disconnect. Every node looks `identity_key` up in its local index, so a multi-device sign-out never scans all sessions and never sends control data to a browser. `control_id` deduplicates the message across the HTTP ingress and the PostgreSQL notification.",
+  "cases": [
+    {
+      "name": "sign_out_everywhere",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f\",\"identity_key\":\"user:7\",\"reason\":\"remote\",\"reconnect\":false}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "disconnect",
+        "namespace": "example_production",
+        "control_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+        "identity_key": "user:7",
+        "reason": "remote",
+        "reconnect": false,
+        "applies_to": "example_production"
+      }
+    },
+    {
+      "name": "forced_reconnect",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"disconnect\",\"namespace\":\"example_production\",\"control_id\":\"11112222-3333-4444-8555-666677778888\",\"identity_key\":\"{\\\"account\\\":3,\\\"current_user\\\":\\\"gid://app/User/7\\\"}\",\"reason\":\"server_restart\",\"reconnect\":true}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "disconnect",
+        "namespace": "example_production",
+        "control_id": "11112222-3333-4444-8555-666677778888",
+        "identity_key": "{\"account\":3,\"current_user\":\"gid://app/User/7\"}",
+        "reason": "server_restart",
+        "reconnect": true,
+        "applies_to": "example_production"
+      }
+    }
+  ]
+}

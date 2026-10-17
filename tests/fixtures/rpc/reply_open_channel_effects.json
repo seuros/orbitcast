@@ -1,0 +1,93 @@
+{
+  "description": "Accepted replies carrying the ordered typed effects. Effects are applied in the order they appear; `json_payload` is the exact Rails-encoded application JSON and is never re-encoded on the way to the browser.",
+  "cases": [
+    {
+      "name": "open_channel_accepted_with_stream_and_transmit",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"subscription_state\":{\"joined_at\":1760000000},\"effects\":[{\"kind\":\"add_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"stream\":\"chat:42\"},{\"kind\":\"add_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"stream\":\"chat:all\"},{\"kind\":\"transmit\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"json_payload\":\"{\\\"type\\\":\\\"backlog\\\",\\\"messages\\\":[1,2,3]}\"}]}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "open_channel",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+        "sequence": 2,
+        "new_revision": 2,
+        "state": "unchanged",
+        "subscription_state": "replace",
+        "effect_kinds": ["add_stream", "add_stream", "transmit"],
+        "effects": [
+          {
+            "kind": "add_stream",
+            "identifier": "{\"channel\":\"ChatChannel\",\"room\":\"42\"}",
+            "stream": "chat:42"
+          },
+          {
+            "kind": "add_stream",
+            "identifier": "{\"channel\":\"ChatChannel\",\"room\":\"42\"}",
+            "stream": "chat:all"
+          },
+          {
+            "kind": "transmit",
+            "identifier": "{\"channel\":\"ChatChannel\",\"room\":\"42\"}",
+            "json_payload": "{\"type\":\"backlog\",\"messages\":[1,2,3]}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "run_action_accepted_with_stream_changes_and_close",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"run_action\",\"outcome\":\"accepted\",\"request_id\":\"7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d\",\"sequence\":3,\"new_revision\":3,\"effects\":[{\"kind\":\"remove_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"stream\":\"chat:all\"},{\"kind\":\"remove_all_streams\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\"},{\"kind\":\"close\",\"reason\":\"unauthorized\",\"reconnect\":false}]}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "run_action",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+        "sequence": 3,
+        "new_revision": 3,
+        "state": "unchanged",
+        "effect_kinds": ["remove_stream", "remove_all_streams", "close"],
+        "effects": [
+          {
+            "kind": "remove_stream",
+            "identifier": "{\"channel\":\"ChatChannel\",\"room\":\"42\"}",
+            "stream": "chat:all"
+          },
+          {
+            "kind": "remove_all_streams",
+            "identifier": "{\"channel\":\"ChatChannel\",\"room\":\"42\"}"
+          },
+          { "kind": "close", "reason": "unauthorized", "reconnect": false }
+        ]
+      }
+    },
+    {
+      "name": "presence_effects_parse_in_phase_two",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"run_action\",\"outcome\":\"accepted\",\"request_id\":\"7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d\",\"sequence\":4,\"new_revision\":4,\"effects\":[{\"kind\":\"presence_grant\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\",\"metadata\":{\"name\":\"Marissa\"},\"ttl_ms\":45000,\"operations\":[\"join\",\"snapshot\"]},{\"kind\":\"presence_revoke\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"stream\":\"chat:42\",\"subject_id\":\"user:9\"}]}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "run_action",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+        "sequence": 4,
+        "new_revision": 4,
+        "state": "unchanged",
+        "effect_kinds": ["presence_grant", "presence_revoke"],
+        "applied_in_phase": 3
+      }
+    }
+  ]
+}

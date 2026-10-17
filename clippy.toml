@@ -1,0 +1,2 @@
+# Product and protocol names read as prose in docs, not code.
+doc-valid-idents = ["ActionCable", "AnyCable", "CableReady", "OrbitCast", ".."]

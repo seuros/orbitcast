@@ -1,0 +1,18 @@
+# Generated-style Orbitcast cable configuration (see
+# gem/lib/generators/orbitcast/install/templates/cable.yml.tt).
+default: &default
+  adapter: orbitcast
+  database_url: <%= ENV.fetch("ORBITCAST_DATABASE_URL", "postgres://localhost/orbitcast_dummy") %>
+  namespace: dummy_<%= Rails.env %>
+  publish_via: postgres
+
+development:
+  <<: *default
+
+# Rails' own in-process adapter keeps application tests isolated; Orbitcast's
+# real path is covered by the integration suites.
+test:
+  adapter: test
+
+production:
+  <<: *default

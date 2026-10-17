@@ -1,0 +1,20 @@
+{
+  "description": "A well-formed overflow notice: the payload exceeded the NOTIFY limit, so only a reference to the orbitcast_payloads row travels. The reference is routing, not authorization: consumers re-validate namespace and stream against the fetched row.",
+  "cases": [
+    {
+      "name": "overflow_reference",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"overflow\",\"id\":\"9d2f1c04-7c3a-4e5b-8a66-f0e9d8c7b6a5\",\"namespace\":\"demo\",\"stream\":\"posts:1\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "overflow",
+        "id": "9d2f1c04-7c3a-4e5b-8a66-f0e9d8c7b6a5",
+        "namespace": "demo",
+        "stream": "posts:1",
+        "channel": "orbitcast_c5748d585378540c557a6893ad3d8866d449a7673b2590b9"
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "description": "Claims without a version field. Tolerant readers default it to 1 (serializers always emit it); everything else validates normally.",
+  "cases": [
+    {
+      "name": "absent_version_reads_as_v1",
+      "input": {
+        "token": "eyJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--6234f578e5520fc55e5e826dec7736039c6461d83a7572bda11c078f64496a3a",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "purpose": "subscribe",
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "expires_at": 4102444800
+        },
+        "stream": "chat:42"
+      }
+    }
+  ]
+}

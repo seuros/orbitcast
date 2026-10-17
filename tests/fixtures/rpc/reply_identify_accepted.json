@@ -1,0 +1,71 @@
+{
+  "description": "Accepted identify replies. The identity map is what Rust indexes the session by; an empty map is still a valid accepted anonymous connection, it is simply not addressable by a remote-disconnect control message.",
+  "cases": [
+    {
+      "name": "identify_accepted_with_identity_and_state",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1,\"identity\":{\"identity_key\":\"user:7\",\"current_user\":\"gid://app/User/7\"},\"state\":{\"locale\":\"fr\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 1,
+        "identity": { "identity_key": "user:7", "current_user": "gid://app/User/7" },
+        "state": "replace",
+        "state_value": { "locale": "fr" },
+        "effects": []
+      }
+    },
+    {
+      "name": "identify_accepted_anonymous",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1,\"identity\":{}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "new_revision": 1,
+        "identity": {},
+        "state": "unchanged",
+        "effects": []
+      }
+    },
+    {
+      "name": "describe_accepted",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"describe\",\"outcome\":\"accepted\",\"request_id\":\"3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e\",\"sequence\":0,\"new_revision\":0,\"describe\":{\"supported_versions\":[1],\"software_version\":\"0.2.0\",\"capabilities\":[\"rails_dispatch\"],\"ready\":true}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "describe",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e",
+        "sequence": 0,
+        "new_revision": 0,
+        "state": "unchanged",
+        "effects": [],
+        "describe": {
+          "supported_versions": [1],
+          "software_version": "0.2.0",
+          "capabilities": ["rails_dispatch"],
+          "ready": true
+        }
+      }
+    }
+  ]
+}

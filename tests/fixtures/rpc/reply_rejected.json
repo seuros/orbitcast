@@ -1,0 +1,159 @@
+{
+  "description": "Replies that must fail closed. Unknown tagged values (operation, outcome, effect kind) and wrong field types are hard errors, never tolerated unknowns; a structurally valid reply can still be refused by semantic validation.",
+  "cases": [
+    {
+      "name": "unknown_outcome",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"outcome\":\"probably\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unknown_outcome"
+      }
+    },
+    {
+      "name": "unknown_operation",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"teleport\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unknown_operation"
+      }
+    },
+    {
+      "name": "unknown_effect_kind",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"effects\":[{\"kind\":\"execute_ruby\",\"source\":\"exit\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unknown_effect"
+      }
+    },
+    {
+      "name": "effect_without_a_kind",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"effects\":[{\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"stream\":\"chat:42\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "wrong_type"
+      }
+    },
+    {
+      "name": "missing_operation",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\"}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "wrong_type"
+      }
+    },
+    {
+      "name": "unsupported_version",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":2,\"operation\":\"identify\",\"outcome\":\"accepted\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"new_revision\":1}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unsupported_version"
+      }
+    },
+    {
+      "name": "close_effect_with_an_unlisted_reason",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"run_action\",\"outcome\":\"accepted\",\"request_id\":\"7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d\",\"sequence\":3,\"new_revision\":3,\"effects\":[{\"kind\":\"close\",\"reason\":\"you_are_fired\",\"reconnect\":false}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "disallowed_value"
+      }
+    },
+    {
+      "name": "transmit_effect_with_malformed_payload",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"effects\":[{\"kind\":\"transmit\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"json_payload\":\"{oops\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "invalid_json_payload"
+      }
+    },
+    {
+      "name": "add_stream_effect_with_an_empty_stream",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"effects\":[{\"kind\":\"add_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"stream\":\"\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_stream"
+      }
+    },
+    {
+      "name": "effect_with_an_empty_identifier",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":2,\"new_revision\":2,\"effects\":[{\"kind\":\"remove_all_streams\",\"identifier\":\"\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_field"
+      }
+    },
+    {
+      "name": "presence_grant_without_a_ttl",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"run_action\",\"outcome\":\"accepted\",\"request_id\":\"7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d\",\"sequence\":3,\"new_revision\":3,\"effects\":[{\"kind\":\"presence_grant\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"stream\":\"chat:42\",\"subject_id\":\"user:7\"}]}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "out_of_range"
+      }
+    },
+    {
+      "name": "reply_that_is_not_json_at_all",
+      "envelope": "reply",
+      "input": {
+        "wire": "<html><body>502 Bad Gateway</body></html>"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "malformed_json"
+      }
+    },
+    {
+      "name": "describe_accepted_without_a_describe_payload",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"describe\",\"outcome\":\"accepted\",\"request_id\":\"3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e\",\"sequence\":0,\"new_revision\":0}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "missing_payload"
+      }
+    },
+    {
+      "name": "describe_that_does_not_speak_v1",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"describe\",\"outcome\":\"accepted\",\"request_id\":\"3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e\",\"sequence\":0,\"new_revision\":0,\"describe\":{\"supported_versions\":[2],\"software_version\":\"9.9.9\",\"ready\":true}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "unsupported_version"
+      }
+    }
+  ]
+}

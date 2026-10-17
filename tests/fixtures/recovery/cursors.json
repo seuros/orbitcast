@@ -1,0 +1,93 @@
+{
+  "description": "Opaque delivery cursors. A cursor is base64(compact JSON) of a (generation, sequence) pair with a fixed key order (v, g, s); both numbers travel as decimal strings because a 64-bit sequence exceeds JavaScript's Number.MAX_SAFE_INTEGER. Encoding is deterministic: the same position always produces the same bytes. A client never inspects a cursor, it stores and echoes it.",
+  "cases": [
+    {
+      "name": "first_position",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=" },
+      "expect": {
+        "valid": true,
+        "generation": "1",
+        "sequence": "7",
+        "json": "{\"v\":1,\"g\":\"1\",\"s\":\"7\"}"
+      }
+    },
+    {
+      "name": "before_the_first_message",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJ2IjoxLCJnIjoiMSIsInMiOiIwIn0=" },
+      "expect": {
+        "valid": true,
+        "generation": "1",
+        "sequence": "0",
+        "json": "{\"v\":1,\"g\":\"1\",\"s\":\"0\"}"
+      }
+    },
+    {
+      "name": "sequence_beyond_max_safe_integer",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJ2IjoxLCJnIjoiMiIsInMiOiI5MDA3MTk5MjU0NzQwOTkzIn0=" },
+      "expect": {
+        "valid": true,
+        "generation": "2",
+        "sequence": "9007199254740993",
+        "json": "{\"v\":1,\"g\":\"2\",\"s\":\"9007199254740993\"}"
+      }
+    },
+    {
+      "name": "maximum_position",
+      "envelope": "cursor",
+      "input": {
+        "cursor": "eyJ2IjoxLCJnIjoiMTg0NDY3NDQwNzM3MDk1NTE2MTUiLCJzIjoiMTg0NDY3NDQwNzM3MDk1NTE2MTUifQ=="
+      },
+      "expect": {
+        "valid": true,
+        "generation": "18446744073709551615",
+        "sequence": "18446744073709551615",
+        "json": "{\"v\":1,\"g\":\"18446744073709551615\",\"s\":\"18446744073709551615\"}"
+      }
+    },
+    {
+      "name": "absent_cursor_version_defaults_to_one_and_unknown_keys_are_ignored",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJnIjoiMyIsInMiOiI5Iiwibm9kZSI6ImEtMSJ9" },
+      "expect": { "valid": true, "generation": "3", "sequence": "9" }
+    },
+    {
+      "name": "empty_cursor",
+      "envelope": "cursor",
+      "input": { "cursor": "" },
+      "expect": { "valid": false, "error_kind": "empty_field" }
+    },
+    {
+      "name": "not_base64",
+      "envelope": "cursor",
+      "input": { "cursor": "!!!not base64!!!" },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "base64_of_something_that_is_not_json",
+      "envelope": "cursor",
+      "input": { "cursor": "bm90IGpzb24=" },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "numbers_instead_of_decimal_strings",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJ2IjoxLCJnIjoxLCJzIjo3fQ==" },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "negative_sequence",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJ2IjoxLCJnIjoiMSIsInMiOiItMSJ9" },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "unsupported_cursor_version",
+      "envelope": "cursor",
+      "input": { "cursor": "eyJ2IjoyLCJnIjoiMSIsInMiOiI3In0=" },
+      "expect": { "valid": false, "error_kind": "unsupported_version" }
+    }
+  ]
+}

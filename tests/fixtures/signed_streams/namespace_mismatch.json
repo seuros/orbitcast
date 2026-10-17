@@ -1,0 +1,49 @@
+{
+  "description": "Correctly signed token issued for another namespace (claims.namespace) than the verifier's (input.namespace). Even with a shared key, a token never crosses namespaces: claims_valid is false, error_kind wrong_namespace.",
+  "cases": [
+    {
+      "name": "token_for_other_namespace",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJvdGhlcl90ZW5hbnQiLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--b89cc102b6e75674da49524c6d559354543d862c5794d912e1fa06bcbc151226",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000,
+        "namespace": "example_production"
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "wrong_namespace",
+        "claims": {
+          "version": 1,
+          "namespace": "other_tenant",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        }
+      }
+    },
+    {
+      "name": "same_token_under_its_own_namespace",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJvdGhlcl90ZW5hbnQiLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--b89cc102b6e75674da49524c6d559354543d862c5794d912e1fa06bcbc151226",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000,
+        "namespace": "other_tenant"
+      },
+      "expect": {
+        "valid": true,
+        "signature_valid": true,
+        "claims_valid": true,
+        "claims": {
+          "version": 1,
+          "namespace": "other_tenant",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        },
+        "stream": "chat:42"
+      }
+    }
+  ]
+}

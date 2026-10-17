@@ -1,0 +1,25 @@
+{
+  "description": "Malformed wire JSON, represented as a string inside this valid fixture wrapper. Decoding must fail; nothing is delivered.",
+  "cases": [
+    {
+      "name": "truncated_notice",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"inline\""
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "malformed_json"
+      }
+    },
+    {
+      "name": "not_json_at_all",
+      "input": {
+        "wire": "NOTIFY payload that is not JSON"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "malformed_json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,129 @@
+{
+  "description": "Integer boundaries. Internal counters are ordinary JSON integers with Rust range checks: a 64-bit sequence or revision at its maximum is valid, deadline_ms must be 1..=60000, and a negative or out-of-range value is a rejection on both ends (a negative integer cannot even decode into the unsigned Rust field: wrong_type). Ruby validates deadline_ms the same way; it never emits negative counters.",
+  "cases": [
+    {
+      "name": "request_with_minimum_deadline",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "identify",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 1,
+        "expected_revision": 0,
+        "deadline_ms": 1,
+        "connection": {
+          "url": "/cable",
+          "origin": null,
+          "client_address": "203.0.113.7",
+          "headers": {}
+        }
+      }
+    },
+    {
+      "name": "request_with_maximum_deadline_and_64_bit_counters",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"run_action\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":18446744073709551615,\"expected_revision\":18446744073709551615,\"deadline_ms\":60000,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"},\"subscription\":{\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\"},\"action\":{\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"json_data\":\"{\\\"action\\\":\\\"speak\\\"}\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "run_action",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d",
+        "sequence": 18446744073709551615,
+        "expected_revision": 18446744073709551615,
+        "deadline_ms": 60000,
+        "connection": {
+          "url": "/cable",
+          "origin": null,
+          "client_address": "203.0.113.7",
+          "headers": {}
+        },
+        "subscription": {
+          "identifier": "{\"channel\":\"ChatChannel\"}",
+          "params": {},
+          "streams": []
+        },
+        "action": {
+          "identifier": "{\"channel\":\"ChatChannel\"}",
+          "json_data": "{\"action\":\"speak\"}"
+        }
+      }
+    },
+    {
+      "name": "request_with_zero_deadline",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":0,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "out_of_range"
+      }
+    },
+    {
+      "name": "request_with_deadline_above_the_maximum",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":60001,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "out_of_range"
+      }
+    },
+    {
+      "name": "request_with_u64_max_deadline",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":18446744073709551615,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "out_of_range"
+      }
+    },
+    {
+      "name": "request_with_negative_deadline",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":-1,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "wrong_type"
+      }
+    },
+    {
+      "name": "reply_with_64_bit_counters",
+      "envelope": "reply",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"open_channel\",\"outcome\":\"accepted\",\"request_id\":\"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f\",\"sequence\":18446744073709551615,\"new_revision\":18446744073709551615,\"effects\":[{\"kind\":\"add_stream\",\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\"}\",\"stream\":\"chat:42\"}]}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "open_channel",
+        "outcome": "accepted",
+        "accepted": true,
+        "request_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+        "sequence": 18446744073709551615,
+        "new_revision": 18446744073709551615,
+        "state": "unchanged",
+        "effect_kinds": [
+          "add_stream"
+        ]
+      }
+    }
+  ]
+}

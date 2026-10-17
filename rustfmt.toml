@@ -1,0 +1,3 @@
+# Fleet style (atlas_monkey_fleet/rustfmt.toml), repeated here because this
+# crate is also released and built as a standalone repository.
+use_small_heuristics = "Max"

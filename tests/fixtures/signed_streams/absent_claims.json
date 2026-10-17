@@ -1,0 +1,89 @@
+{
+  "description": "Correctly signed tokens each missing ONE authorization-bearing claim. A verifier must fail closed on the absence (error_kind missing_claim, expect.missing names the field) rather than default it to something permissive: no namespace is not every namespace, no expiry is not never.",
+  "cases": [
+    {
+      "name": "absent_namespace",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--c7385a40e49b85f8f024455ec434f8db67b14d332a3fbe28a9a5eb821b249fc6",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "missing_claim",
+        "missing": "namespace",
+        "claims": {
+          "version": 1,
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        }
+      }
+    },
+    {
+      "name": "absent_stream",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJwdXJwb3NlIjoic3Vic2NyaWJlIiwiZXhwaXJlc19hdCI6NDEwMjQ0NDgwMH0=--6e8d7c608bf4c5660de7b99533cdc83c72ba021f7d7bf25a02aedff2a870ce8b",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "missing_claim",
+        "missing": "stream",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        }
+      }
+    },
+    {
+      "name": "absent_purpose",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwiZXhwaXJlc19hdCI6NDEwMjQ0NDgwMH0=--c52f4799dee0a3561e5bf690723d97694adcd66d86404390068a076e97c29697",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "missing_claim",
+        "missing": "purpose",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "expires_at": 4102444800
+        }
+      }
+    },
+    {
+      "name": "absent_expires_at",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSJ9--e0b697e4666296a162835daffaa9e6686aeacdf05617ee1aaa1810697a3e938a",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": true,
+        "claims_valid": false,
+        "error_kind": "missing_claim",
+        "missing": "expires_at",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe"
+        }
+      }
+    }
+  ]
+}

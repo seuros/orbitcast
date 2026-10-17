@@ -1,0 +1,83 @@
+{
+  "description": "Recovery session snapshots: the versioned JSON the broker stores per recovery session in orbitcast_sessions.snapshot and reads back when a client resumes without cursors. Written and read by the relay only (src/protocol/v1/recovery.rs SessionSnapshot); never sent to a browser, never produced by the gem. Holds the session identity reference and opaque cursors and nothing else, so it is stored in clear: there is nothing sensitive in it and no encryption. A stored snapshot gets the same validation an inbound envelope gets - an unusable one is ignored and the session resumes live, never from a guessed position. Consumed by src/protocol/v1/recovery/tests.rs; the gem's contract test only reads the recovery/ directory.",
+  "cases": [
+    {
+      "name": "cursors_for_two_streams",
+      "envelope": "snapshot",
+      "input": {
+        "wire": "{\"version\":1,\"session_id\":\"session:7\",\"cursors\":{\"chat:42\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\",\"posts:1\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiIwIn0=\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "session_id": "session:7",
+        "cursor_streams": ["chat:42", "posts:1"],
+        "cursor_sequences": { "chat:42": "7", "posts:1": "0" },
+        "canonical": true
+      }
+    },
+    {
+      "name": "fresh_lease_has_an_empty_snapshot",
+      "envelope": "snapshot",
+      "input": { "wire": "{}" },
+      "expect": {
+        "valid": false,
+        "error_kind": "empty_field"
+      }
+    },
+    {
+      "name": "absent_version_defaults_to_one_and_unknown_fields_are_ignored",
+      "envelope": "snapshot",
+      "input": {
+        "wire": "{\"session_id\":\"session:7\",\"cursors\":{\"chat:42\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\"},\"node\":\"relay-a\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "session_id": "session:7",
+        "cursor_streams": ["chat:42"],
+        "cursor_sequences": { "chat:42": "7" }
+      }
+    },
+    {
+      "name": "no_cursors_is_a_valid_empty_memory",
+      "envelope": "snapshot",
+      "input": { "wire": "{\"version\":1,\"session_id\":\"session:7\",\"cursors\":{}}" },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "session_id": "session:7",
+        "cursor_streams": [],
+        "canonical": true
+      }
+    },
+    {
+      "name": "foreign_version",
+      "envelope": "snapshot",
+      "input": { "wire": "{\"version\":2,\"session_id\":\"session:7\",\"cursors\":{}}" },
+      "expect": { "valid": false, "error_kind": "unsupported_version" }
+    },
+    {
+      "name": "an_unusable_cursor_poisons_the_snapshot",
+      "envelope": "snapshot",
+      "input": {
+        "wire": "{\"version\":1,\"session_id\":\"session:7\",\"cursors\":{\"chat:42\":\"nonsense\"}}"
+      },
+      "expect": { "valid": false, "error_kind": "disallowed_value" }
+    },
+    {
+      "name": "a_cursor_for_an_empty_stream_name",
+      "envelope": "snapshot",
+      "input": {
+        "wire": "{\"version\":1,\"session_id\":\"session:7\",\"cursors\":{\"\":\"eyJ2IjoxLCJnIjoiMSIsInMiOiI3In0=\"}}"
+      },
+      "expect": { "valid": false, "error_kind": "empty_stream" }
+    },
+    {
+      "name": "malformed_json",
+      "envelope": "snapshot",
+      "input": { "wire": "{\"version\":1,\"session_id\":" },
+      "expect": { "valid": false, "error_kind": "malformed_json" }
+    }
+  ]
+}

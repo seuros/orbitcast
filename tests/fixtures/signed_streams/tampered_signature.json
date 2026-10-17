@@ -1,0 +1,26 @@
+{
+  "description": "The encoded claims are semantically valid, but the signature was taken from a different token. HMAC verification over the encoded bytes must fail before the claims are ever interpreted.",
+  "cases": [
+    {
+      "name": "signature_from_other_claims",
+      "input": {
+        "token": "eyJ2ZXJzaW9uIjoxLCJuYW1lc3BhY2UiOiJleGFtcGxlX3Byb2R1Y3Rpb24iLCJzdHJlYW0iOiJjaGF0OjQyIiwicHVycG9zZSI6InN1YnNjcmliZSIsImV4cGlyZXNfYXQiOjQxMDI0NDQ4MDB9--28b1687dae3f9dd053881a5568544fea5d76c8cbf66c5df7948908bb6f9ebe97",
+        "secret": "test-secret-32-bytes-padded-000000",
+        "now": 1760000000
+      },
+      "expect": {
+        "valid": false,
+        "signature_valid": false,
+        "claims_valid": true,
+        "error_kind": "bad_signature",
+        "claims": {
+          "version": 1,
+          "namespace": "example_production",
+          "stream": "chat:42",
+          "purpose": "subscribe",
+          "expires_at": 4102444800
+        }
+      }
+    }
+  ]
+}

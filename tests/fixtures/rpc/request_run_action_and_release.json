@@ -1,0 +1,85 @@
+{
+  "description": "run_action carries the exact client-encoded `data` text (Rails reads data[\"action\"] out of those bytes); release_connection carries the final close reason, the reconnect policy that was advertised, and every subscription still installed.",
+  "cases": [
+    {
+      "name": "run_action_request",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"run_action\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d\",\"sequence\":3,\"expected_revision\":2,\"deadline_ms\":1000,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"},\"subscription\":{\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"streams\":[\"chat:42\"]},\"action\":{\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"json_data\":\"{\\\"action\\\":\\\"speak\\\",\\\"text\\\":\\\"h\\u00e9llo\\\"}\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "run_action",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+        "sequence": 3,
+        "expected_revision": 2,
+        "deadline_ms": 1000,
+        "action": {
+          "identifier": "{\"channel\":\"ChatChannel\",\"room\":\"42\"}",
+          "json_data": "{\"action\":\"speak\",\"text\":\"héllo\"}"
+        }
+      }
+    },
+    {
+      "name": "release_connection_request",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"release_connection\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"0d1e2f3a-4b5c-4d6e-8f9a-0b1c2d3e4f5a\",\"sequence\":9,\"expected_revision\":4,\"deadline_ms\":1000,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\",\"identity\":{\"identity_key\":\"user:7\"},\"state\":{\"cart_id\":19}},\"release\":{\"reason\":\"remote\",\"reconnect\":false,\"subscriptions\":[{\"identifier\":\"{\\\"channel\\\":\\\"ChatChannel\\\",\\\"room\\\":\\\"42\\\"}\",\"streams\":[\"chat:42\"]}]}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "operation": "release_connection",
+        "namespace": "example_production",
+        "node_id": "node-7",
+        "session_id": "2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e",
+        "request_id": "0d1e2f3a-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
+        "sequence": 9,
+        "expected_revision": 4,
+        "deadline_ms": 1000,
+        "release": {
+          "reason": "remote",
+          "reconnect": false,
+          "subscription_count": 1
+        }
+      }
+    },
+    {
+      "name": "identify_request_missing_its_connection_payload",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1000}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "missing_payload"
+      }
+    },
+    {
+      "name": "request_forwarding_a_hop_by_hop_header",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"deadline_ms\":1000,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\",\"headers\":{\"transfer-encoding\":\"chunked\"}}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "disallowed_value"
+      }
+    },
+    {
+      "name": "request_without_a_deadline",
+      "envelope": "request",
+      "input": {
+        "wire": "{\"version\":1,\"operation\":\"identify\",\"namespace\":\"example_production\",\"node_id\":\"node-7\",\"session_id\":\"2f4a6c8e-1b3d-4f5a-9c7e-0d1a2b3c4d5e\",\"request_id\":\"9a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d\",\"sequence\":1,\"expected_revision\":0,\"connection\":{\"url\":\"/cable\",\"client_address\":\"203.0.113.7\"}}"
+      },
+      "expect": {
+        "valid": false,
+        "error_kind": "out_of_range"
+      }
+    }
+  ]
+}

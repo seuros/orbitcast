@@ -1,0 +1,37 @@
+{
+  "description": "Envelopes without a version field. Tolerant readers default the absent version to 1 (serializers always emit it); everything else validates normally.",
+  "cases": [
+    {
+      "name": "notice_without_version",
+      "input": {
+        "wire": "{\"kind\":\"overflow\",\"id\":\"9d2f1c04-7c3a-4e5b-8a66-f0e9d8c7b6a5\",\"namespace\":\"demo\",\"stream\":\"posts:1\"}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "overflow",
+        "id": "9d2f1c04-7c3a-4e5b-8a66-f0e9d8c7b6a5",
+        "namespace": "demo",
+        "stream": "posts:1",
+        "channel": "orbitcast_c5748d585378540c557a6893ad3d8866d449a7673b2590b9"
+      }
+    },
+    {
+      "name": "inline_publication_without_version",
+      "input": {
+        "wire": "{\"version\":1,\"kind\":\"inline\",\"publication\":{\"namespace\":\"example_production\",\"id\":\"4b8e6cb6-56f1-4f3e-9c86-3d1b2f0a7c11\",\"stream\":\"chat:42\",\"json_payload\":\"{}\"}}"
+      },
+      "expect": {
+        "valid": true,
+        "version": 1,
+        "kind": "inline",
+        "publication_version": 1,
+        "namespace": "example_production",
+        "stream": "chat:42",
+        "id": "4b8e6cb6-56f1-4f3e-9c86-3d1b2f0a7c11",
+        "json_payload": "{}",
+        "channel": "orbitcast_75ba535bd0c12e8f0990bf756607b4f5ddb148f2e22070e1"
+      }
+    }
+  ]
+}

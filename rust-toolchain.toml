@@ -1,0 +1,7 @@
+# Pinned toolchain. rustup reads this file in this directory; CI and
+# release.yml install the same channel so a release binary is never built by
+# whatever "stable" happened to be that day.
+# Keep `channel` in lockstep with `rust-version` in Cargo.toml (the MSRV).
+[toolchain]
+channel = "1.99"
+components = ["rustfmt", "clippy"]
