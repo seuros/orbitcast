@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/seuros/orbitcast/compare/v0.3.1...v0.3.2) (2026-10-18)
+
+
+### Bug Fixes
+
+* **gem:** advertise the relay's required capabilities, read cable config on Rails main ([a332fc3](https://github.com/seuros/orbitcast/commit/a332fc3cb0a6f28d4aae76cd83a60715d5702621))
+
 ## [0.3.1](https://github.com/seuros/orbitcast/compare/v0.3.0...v0.3.1) (2026-10-17)
 
 
