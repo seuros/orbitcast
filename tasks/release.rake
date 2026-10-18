@@ -2,10 +2,11 @@
 
 # Release tasks: crate, gem, and tag versions move in lockstep.
 #
-#   release:verify   crate version == gem version (== TAG), every pkg/*.gem
-#                    vendors exactly one matching platform binary with a
-#                    complete manifest, all gems share one version, and — when
-#                    TAG is set (the publish job) — all five platforms exist.
+#   release:verify   crate version == gem version (== TAG), every platform
+#                    gem vendors exactly one matching binary with a complete
+#                    manifest, the ruby gem vendors none, all gems share one
+#                    version, and — when TAG is set (the publish job) — all
+#                    five platforms and the ruby gem exist.
 #   release:package  build + package every platform, then verify. Needs a
 #                    macOS host with the Apple SDK for the Darwin targets and
 #                    cargo-zigbuild + Zig for the Linux targets.
@@ -49,6 +50,12 @@ namespace :release do
       Dir.mktmpdir("orbitcast-verify-") do |dir|
         package.extract_files(dir)
         binaries = Dir[File.join(dir, "vendor", "*", "bin", "orbitcast")]
+
+        if spec.platform.to_s == Gem::Platform::RUBY
+          seen_platforms << Gem::Platform::RUBY
+          errors << "#{name}: the ruby gem must not vendor a binary" unless Dir[File.join(dir, "vendor")].empty?
+          next
+        end
 
         unless binaries.length == 1
           found = binaries.map { |b| b.delete_prefix("#{dir}/") }
@@ -96,7 +103,7 @@ namespace :release do
     distinct = seen_versions.uniq
     errors << "pkg/ mixes gem versions: #{distinct.join(", ")}" if distinct.length > 1
 
-    missing = OrbitcastRelease::PLATFORM_TARGETS.keys - seen_platforms
+    missing = OrbitcastRelease::PLATFORM_TARGETS.keys + [Gem::Platform::RUBY] - seen_platforms
     if require_complete && !missing.empty?
       errors << "pkg/ is missing platform gems: #{missing.join(", ")} " \
                 "(the complete matrix must build before any gem is published)"
@@ -123,6 +130,7 @@ namespace :release do
       Rake::Task["native:package"].reenable
       Rake::Task["native:package"].invoke(platform)
     end
+    Rake::Task["native:stub"].invoke
     ENV["RELEASE_VERIFY_COMPLETE"] = "1"
     Rake::Task["release:verify"].reenable
     Rake::Task["release:verify"].invoke
@@ -139,13 +147,14 @@ namespace :gems do
   task :fetch, [:tag] do |_task, args|
     version = release_version.call(args[:tag])
     sh "gh", "release", "download", "v#{version}", "--repo", "seuros/orbitcast",
-       "--pattern", "orbitcast-#{version}-*.gem", "--dir", OrbitcastRelease::PKG_DIR, "--clobber"
+       "--pattern", "orbitcast-#{version}-*.gem", "--pattern", "orbitcast-#{version}.gem",
+       "--dir", OrbitcastRelease::PKG_DIR, "--clobber"
   end
 
   desc "Fetch a release's gems, then push each to rubygems.org"
   task :push, [:tag] => :fetch do |_task, args|
     version = release_version.call(args[:tag])
-    gems = Dir[File.join(OrbitcastRelease::PKG_DIR, "orbitcast-#{version}-*.gem")]
+    gems = Dir[File.join(OrbitcastRelease::PKG_DIR, "orbitcast-#{version}{,-*}.gem")]
     abort "no gems in pkg/ for this release" if gems.empty?
 
     failed = gems.reject { |gem| system("gem", "push", gem) }

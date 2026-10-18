@@ -218,10 +218,15 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Crate version == gem version == tag; every gem carries exactly one
-      # platform binary whose manifest (version, target, features, envelope
-      # versions, toolchain, platform floor) matches; all five platforms
-      # present and on one version.
+      # The ruby-platform gem: the Ruby code without a binary, for lockfiles
+      # that list `ruby`.
+      - name: Build ruby gem
+        run: rake native:stub
+
+      # Crate version == gem version == tag; every platform gem carries
+      # exactly one binary whose manifest (version, target, features,
+      # envelope versions, toolchain, platform floor) matches, the ruby gem
+      # none; all five platforms and the ruby gem present, on one version.
       - name: release:verify
         env:
           TAG: ${{ needs.verify-tag.outputs.tag }}

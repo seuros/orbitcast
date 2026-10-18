@@ -149,6 +149,47 @@ module OrbitcastRelease
     manifest[:gem_platform] = platform
     manifest
   end
+
+  def ensure_lockstep!
+    return if crate_version == gem_version
+
+    abort "version drift: Cargo.toml=#{crate_version} gem/lib/orbitcast/version.rb=#{gem_version} " \
+          "(release-please keeps these in lockstep; do not hand-edit one side)"
+  end
+
+  # Build pkg/<gem> for `gem_platform` from an isolated staging tree: never
+  # the working checkout, so stray vendor/ leftovers or other platforms'
+  # binaries cannot leak into the gem. The block adds files to the tree and
+  # returns their paths.
+  def build_gem(gem_platform)
+    require "rubygems/package"
+
+    Dir.mktmpdir("orbitcast-package-") do |staging|
+      base_spec = Gem::Specification.load(GEMSPEC) or abort "failed to load #{GEMSPEC}"
+
+      FileUtils.cp(GEMSPEC, File.join(staging, "orbitcast.gemspec"))
+      base_spec.files.each do |rel|
+        dest = File.join(staging, rel)
+        FileUtils.mkdir_p(File.dirname(dest))
+        FileUtils.cp(File.join(GEM_DIR, rel), dest)
+      end
+
+      # Reuse the already-loaded spec rather than evaluating the staged
+      # gemspec a second time (which re-requires version.rb from another
+      # path and warns about a redefined constant). Files are relative, so
+      # building from the staging directory picks up the added tree.
+      spec = base_spec.dup
+      spec.files += block_given? ? yield(staging) : []
+      spec.platform = gem_platform
+
+      Dir.chdir(staging) do
+        file_name = Gem::Package.build(spec)
+        FileUtils.mkdir_p(PKG_DIR)
+        FileUtils.mv(file_name, File.join(PKG_DIR, file_name))
+        file_name
+      end
+    end
+  end
 end
 
 namespace :native do
@@ -198,13 +239,7 @@ namespace :native do
       abort "usage: rake 'native:package[<gem-platform>]' " \
             "(platforms: #{OrbitcastRelease::PLATFORM_TARGETS.keys.join(", ")})"
     target = OrbitcastRelease.target_for(platform)
-
-    version = OrbitcastRelease.crate_version
-    gem_version = OrbitcastRelease.gem_version
-    unless version == gem_version
-      abort "version drift: Cargo.toml=#{version} gem/lib/orbitcast/version.rb=#{gem_version} " \
-            "(release-please keeps these in lockstep; do not hand-edit one side)"
-    end
+    OrbitcastRelease.ensure_lockstep!
 
     binary = OrbitcastRelease.release_binary(target)
     unless File.file?(binary)
@@ -221,44 +256,26 @@ namespace :native do
 
     manifest = OrbitcastRelease.manifest_for(platform, target)
 
-    # Isolated staging tree: never build out of the working checkout, so stray
-    # vendor/ leftovers or other platforms' binaries cannot leak into the gem.
-    built = Dir.mktmpdir("orbitcast-package-") do |staging|
-      base_spec = Gem::Specification.load(OrbitcastRelease::GEMSPEC) or
-        abort "failed to load #{OrbitcastRelease::GEMSPEC}"
-
-      FileUtils.cp(OrbitcastRelease::GEMSPEC, File.join(staging, "orbitcast.gemspec"))
-      base_spec.files.each do |rel|
-        src = File.join(OrbitcastRelease::GEM_DIR, rel)
-        dest = File.join(staging, rel)
-        FileUtils.mkdir_p(File.dirname(dest))
-        FileUtils.cp(src, dest)
-      end
-
+    built = OrbitcastRelease.build_gem(gem_platform) do |staging|
       vendor_bin = File.join("vendor", platform, "bin", "orbitcast")
       vendor_manifest = File.join("vendor", platform, "manifest.json")
       FileUtils.mkdir_p(File.join(staging, "vendor", platform, "bin"))
       FileUtils.cp(binary, File.join(staging, vendor_bin))
       FileUtils.chmod(0o755, File.join(staging, vendor_bin))
       File.write(File.join(staging, vendor_manifest), JSON.pretty_generate(manifest) + "\n")
-
-      # Reuse the already-loaded spec rather than evaluating the staged
-      # gemspec a second time (which re-requires version.rb from another
-      # path and warns about a redefined constant). Files are relative, so
-      # building from the staging directory picks up the vendored tree.
-      spec = base_spec.dup
-      spec.files += [vendor_bin, vendor_manifest]
-      spec.platform = gem_platform
-
-      Dir.chdir(staging) do
-        file_name = Gem::Package.build(spec)
-        FileUtils.mkdir_p(OrbitcastRelease::PKG_DIR)
-        FileUtils.mv(file_name, File.join(OrbitcastRelease::PKG_DIR, file_name))
-        file_name
-      end
+      [vendor_bin, vendor_manifest]
     end
 
     puts "built pkg/#{built} (manifest: #{manifest.reject { |k, _| k == :commit }.to_json})"
+  end
+
+  # Lockfiles that list the `ruby` platform (or a `force_ruby_platform`
+  # bundle) resolve only if this gem exists; it runs with ORBITCAST_BINARY.
+  desc "Build the ruby-platform gem into pkg/: the Ruby code, no vendored binary"
+  task :stub do
+    OrbitcastRelease.ensure_lockstep!
+    built = OrbitcastRelease.build_gem(Gem::Platform::RUBY)
+    puts "built pkg/#{built} (no vendored binary)"
   end
 
   desc "Offline install of the built platform gem + binary inspection + --version/doctor + real WebSocket/PostgreSQL round trip when SMOKE_DATABASE_URL is set (e.g. native:smoke[arm64-darwin])"
