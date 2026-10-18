@@ -111,6 +111,13 @@ class ActionCableAdapterTest < Minitest::Test
     end
   end
 
+  # Rails main's SubscriptionAdapter::Base keeps no `server` reader.
+  def test_cable_options_do_not_need_the_server_after_construction
+    @adapter.define_singleton_method(:server) { raise NoMethodError, "no server on Rails main" }
+
+    assert_equal Orbitcast::TestHelper::NAMESPACE, @adapter.send(:cable_options)[:namespace]
+  end
+
   def test_identifier_still_follows_the_base_contract
     assert_equal "ActionCable-PID-#{Process.pid}", @adapter.identifier
   end

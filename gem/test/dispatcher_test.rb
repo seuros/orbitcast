@@ -118,6 +118,15 @@ if DISPATCHER_AVAILABLE
       refute reply.key?("identity"), "describe carries no session"
     end
 
+    def test_describe_advertises_every_capability_the_relay_requires
+      source = File.expand_path("../../src/rpc_client.rs", __dir__)
+      skip "relay source is not in this checkout" unless File.file?(source)
+
+      required = File.read(source)[/REQUIRED_CAPABILITIES: &\[&str\] = &\[([^\]]*)\]/, 1].to_s.scan(/"([^"]+)"/).flatten
+      refute_empty required, "REQUIRED_CAPABILITIES not found in #{source}"
+      assert_empty required - dispatch(request("describe")).to_h.dig("describe", "capabilities")
+    end
+
     def test_describe_is_not_ready_without_a_channel_registry
       reply = dispatch(request("describe"), registry: Orbitcast::ChannelRegistry.new([])).to_h
 

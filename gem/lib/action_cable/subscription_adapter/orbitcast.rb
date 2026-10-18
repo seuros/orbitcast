@@ -28,6 +28,8 @@ module ActionCable
     class Orbitcast < Base
       def initialize(server)
         super
+        # Rails main's Base keeps no `server` reader; read the config now.
+        @cable = server.config.cable
         @publisher = nil
         @mutex = Mutex.new
       end
@@ -88,7 +90,7 @@ module ActionCable
       # `cable[:id]` is ActionCable's own connection tag and `adapter` selects
       # us; neither is an Orbitcast setting.
       def cable_options
-        server.config.cable.to_h.transform_keys(&:to_sym).except(:adapter, :id)
+        @cable.to_h.transform_keys(&:to_sym).except(:adapter, :id)
       end
 
       def unsupported_message(operation, channel)

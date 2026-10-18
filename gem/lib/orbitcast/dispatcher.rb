@@ -32,8 +32,9 @@ module Orbitcast
     V1 = Protocol::V1
 
     # Named capabilities reported by `describe`. The relay admits a node by
-    # envelope version and capability, never by build equality.
-    CAPABILITIES = %w[rails_dispatch].freeze
+    # envelope version and capability (its REQUIRED_CAPABILITIES), never by
+    # build equality.
+    CAPABILITIES = %w[rails_dispatch identify open_channel run_action release].freeze
 
     def initialize(config: nil, registry: nil, connection_class: nil, logger: nil)
       @config = config || Orbitcast.config
