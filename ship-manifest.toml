@@ -56,17 +56,16 @@ routes = [
   { bind = "http", pattern = "/cable" },
 ]
 
+# The relay connects to PostgreSQL before it docks, so the database and the
+# namespace come from the environment, not from this handshake:
+# ORBITCAST_DATABASE_URL, ORBITCAST_LISTENER_DATABASE_URL (optional, a direct
+# or session-mode connection to the same database, never transaction
+# pooling) and ORBITCAST_NAMESPACE (part of every channel name and
+# publication envelope; two deployments sharing a database must not share
+# one, and it must match the Rails publisher's).
+env = { ORBITCAST_DATABASE_URL = "postgres://localhost/myapp_development", ORBITCAST_NAMESPACE = "myapp_development" }
+
 [bays.websocket.config]
-database_url = "postgres://localhost/myapp_development"
-# Optional separate DSN for the LISTEN session (must address the same cable
-# database; direct connection or session-mode pooler, never transaction
-# pooling). Defaults to database_url.
-# listener_database_url = "postgres://localhost/myapp_development"
-# Required by the PostgreSQL pub/sub backend: part of every channel name and
-# every publication envelope, and re-validated on receipt. Two deployments
-# sharing a database must not share a namespace. Must match the Rails
-# publisher's namespace.
-namespace = "myapp_development"
 # Optional pub/sub tuning:
 # pubsub_ack_timeout_ms = "5000"    # LISTEN/UNLISTEN acknowledgement deadline
 # pubsub_queue_capacity = "1024"    # bound on notification intake/delivery queues
