@@ -93,7 +93,11 @@ Two independent transports; either or both:
 - **Docking** — OrbitCast runs as a
   [Mothership](https://github.com/seuros/mothership) ship over a Unix
   socket; the [`guardship`](https://rubygems.org/gems/guardship) gem wraps
-  the supervisor environment this needs.
+  the supervisor environment this needs. From a Rails app, run the bay as
+  `command = "bundle"`, `args = ["exec", "orbitcast"]`: under Mothership the
+  launcher execs the gem's relay with the docking environment, without
+  booting Rails. A bare `orbitcast` on `PATH` is RubyGems' wrapper, which
+  needs the app's gems outside Bundler.
 
 A third, private listener — the HTTP ingress (`ORBITCAST_INGRESS_LISTEN_ADDR`,
 loopback by default) — accepts `POST /v1/publications` (for
