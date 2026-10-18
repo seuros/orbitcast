@@ -155,6 +155,44 @@ class LauncherTest < Minitest::Test
     refute env.key?("AWS_SECRET_ACCESS_KEY")
   end
 
+  def test_a_docked_relay_keeps_the_supervisor_environment
+    launcher = build_launcher({
+      "PATH" => "/usr/bin",
+      "MS_PID" => "42",
+      "MS_SHIP" => "orbitcast",
+      "MS_SOCKET_DIR" => "/tmp/mothership",
+      "MS_SOCKET_PATH" => "/tmp/mothership/orbitcast.sock",
+      "ORBITCAST_RPC_TOKEN_BASE64" => "dG9rZW4=",
+      "DATABASE_URL" => "postgres://app/primary",
+      "RAILS_MASTER_KEY" => "master"
+    })
+
+    assert_predicate launcher, :docked?
+    env = launcher.docked_env
+    assert_equal %w[42 orbitcast /tmp/mothership /tmp/mothership/orbitcast.sock],
+                 env.values_at("MS_PID", "MS_SHIP", "MS_SOCKET_DIR", "MS_SOCKET_PATH")
+    assert_equal "dG9rZW4=", env["ORBITCAST_RPC_TOKEN_BASE64"]
+    refute env.key?("DATABASE_URL")
+    refute env.key?("RAILS_MASTER_KEY")
+    refute_predicate build_launcher({ "MS_PID" => "42" }), :docked?, "MS_SHIP is needed too"
+  end
+
+  def test_a_docked_serve_execs_the_relay_without_booting_rails
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "config"))
+      File.write(File.join(dir, "config", "environment.rb"), "raise 'Rails must not boot'\n")
+      launcher = build_launcher({ "MS_PID" => "42", "MS_SHIP" => "orbitcast" }, cwd: dir)
+      execs = []
+      launcher.define_singleton_method(:exec_process) { |child, *args, **| execs << [child, args] }
+
+      launcher.run
+
+      assert_equal 1, execs.size
+      assert_equal "orbitcast", execs.first.first["MS_SHIP"]
+      assert_equal ["serve"], execs.first.last
+    end
+  end
+
   # --- argv ---------------------------------------------------------------------
 
   def test_command_detection_skips_flag_values

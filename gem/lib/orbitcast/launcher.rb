@@ -30,6 +30,10 @@ module Orbitcast
     # treats it.
     DEFAULT_COMMAND = "serve"
 
+    # Set by Mothership for a vessel it supervises; the relay docks when it
+    # sees them (src/config.rs).
+    DOCKING_KEYS = %w[MS_PID MS_SHIP].freeze
+
     # Non-secret process environment forwarded to the child in *both* modes.
     # Anything not listed here, in EXPORTED_KEYS, or (direct mode only) an
     # `ORBITCAST_*` key of the parent is dropped (`unsetenv_others: true`).
@@ -104,6 +108,7 @@ module Orbitcast
 
     def run
       return exec_direct(verify: false) if passthrough?
+      return exec_docked if docked?
       return exec_serve if command == DEFAULT_COMMAND && rails_application?
 
       # Direct invocation: TOML/environment configured, no Rails boot.
@@ -142,6 +147,19 @@ module Orbitcast
       end
 
       strip_forbidden(child)
+    end
+
+    # Under Mothership the manifest configures the bay (its env and the
+    # docking handshake), so Rails is not booted and the supervisor's MS_*
+    # environment reaches the relay.
+    def docked?
+      DOCKING_KEYS.all? { |key| env[key] && !env[key].empty? }
+    end
+
+    def docked_env
+      child = direct_env
+      env.each_pair { |key, value| child[key] = value if key.to_s.start_with?("MS_") }
+      child
     end
 
     # The positional command, ignoring flags and the values they consume.
@@ -283,6 +301,10 @@ module Orbitcast
     # us; the allowlist still applies.
     def exec_direct(verify: true)
       exec_process(direct_env, *argv, verify: verify)
+    end
+
+    def exec_docked
+      exec_process(docked_env, *argv)
     end
 
     def strip_forbidden(child)
