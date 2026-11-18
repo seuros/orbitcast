@@ -86,7 +86,7 @@ jobs:
         include:
           - platform: arm64-darwin
             target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             builder: build
           - platform: x86_64-darwin
             target: x86_64-apple-darwin
