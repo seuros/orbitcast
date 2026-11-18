@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/seuros/orbitcast/compare/v0.3.3...v0.3.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* breaker-machines 0.27 and throttle-machines 0.6 ([1cf0edc](https://github.com/seuros/orbitcast/commit/1cf0edc39c72b94e82214e04570fd5ded1c50b70))
+
 ## [0.3.3](https://github.com/seuros/orbitcast/compare/v0.3.2...v0.3.3) (2026-10-18)
 
 
