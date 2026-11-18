@@ -61,12 +61,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -283,13 +277,12 @@ dependencies = [
 
 [[package]]
 name = "breaker-machines"
-version = "0.20.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057e791c79cc08931d779c346585b966f851bf4040b41a0699796e4d65f6603c"
+checksum = "7fc81870e2f03b6cbd053df8dc52ad6216a86cb7c3d47d4440b52ca7f52114e8"
 dependencies = [
  "chrono-machines",
- "hashbrown 0.17.1",
- "spin 0.12.3",
+ "periscope-machines",
  "state-machines",
 ]
 
@@ -402,12 +395,9 @@ dependencies = [
 
 [[package]]
 name = "chrono-machines"
-version = "0.9.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae0a9daba5af0f4bf463096fe7ba3c1f19d82ad67f12da24775cbc40c9c0eb0c"
-dependencies = [
- "rand",
-]
+checksum = "048698e0b5e5af9301fc37849e441e8ec332c8275652f6566f06120fd598ed56"
 
 [[package]]
 name = "clang-sys"
@@ -802,7 +792,7 @@ dependencies = [
  "fastrand",
  "futures-core",
  "futures-sink",
- "spin 0.9.9",
+ "spin",
 ]
 
 [[package]]
@@ -816,12 +806,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "foreign-types"
@@ -1037,6 +1021,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "harel-machines"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c55c0689200ba712a0c4360a54ec8bac72ba928bc3229e558b1ebb1ea01a49d7"
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1048,7 +1038,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "foldhash 0.1.5",
+ "foldhash",
 ]
 
 [[package]]
@@ -1056,11 +1046,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "heck"
@@ -1638,7 +1623,7 @@ dependencies = [
  "httparse",
  "memchr",
  "mime",
- "spin 0.9.9",
+ "spin",
  "version_check",
 ]
 
@@ -1913,6 +1898,12 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "periscope-machines"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1602a0bb66b4ba9529244868a2344cc39282c62c8ae4df357244adf49347bf51"
 
 [[package]]
 name = "petgraph"
@@ -3362,12 +3353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spin"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3375,9 +3360,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-machines"
-version = "0.32.1"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9b6f45e43f20a6eba0d7c03779b53775e0d9b40a452b89e55ea7aae87fa7a14"
+checksum = "f2fb3f0428a4a79e7929cacf1186fea42291446987807a5136daae4161c13fcf"
 dependencies = [
  "state-machines-core",
  "state-machines-macro",
@@ -3385,20 +3370,17 @@ dependencies = [
 
 [[package]]
 name = "state-machines-core"
-version = "0.13.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7a38d0afcf79a49438b4342ea90beec6490664a0725b2932f6e816d83bc46fe"
-dependencies = [
- "serde",
- "serde_json",
-]
+checksum = "1d027fb20a763004675f678951c6c9537d9dbc2b26056c37d41cefb014e55daf"
 
 [[package]]
 name = "state-machines-macro"
-version = "0.32.1"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "604a644fc18fffd8845eb7f48e332d79a24750ac9d463a39d9b3cb10c44fcc28"
+checksum = "c16c56f4525fd7923580b96d7066341d3b10e772aa2e679e0c65b04881ba9439"
 dependencies = [
+ "harel-machines",
  "proc-macro2",
  "quote",
  "syn 3.0.8",
@@ -3527,9 +3509,9 @@ dependencies = [
 
 [[package]]
 name = "throttle-machines"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4e8f0e39063d5125c8fe6c6685bc7de2b3594ce3b3b48a596be9a351979b6da"
+checksum = "f594c2be67471326684e275c0cab480b6ccbdecdb78866ebef535c701d902ee5"
 
 [[package]]
 name = "time"

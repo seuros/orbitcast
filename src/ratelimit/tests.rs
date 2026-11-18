@@ -55,8 +55,8 @@ fn idle_keys_are_swept_before_the_table_fails_closed() {
     let limiter = KeyedRateLimit::per_second(4, 2).expect("enabled");
 
     // Two keys with untouched (full) buckets: recorded, but idle.
-    limiter.buckets.insert(1u32, TokenBucketState { tokens: 4.0, last_refill: 0.0 });
-    limiter.buckets.insert(2u32, TokenBucketState { tokens: 4.0, last_refill: 0.0 });
+    limiter.buckets.insert(1u32, TokenBucket::new(limiter.policy));
+    limiter.buckets.insert(2u32, TokenBucket::new(limiter.policy));
     assert_eq!(limiter.tracked(), 2);
 
     assert!(limiter.allow(3u32), "idle buckets carry no state worth keeping");

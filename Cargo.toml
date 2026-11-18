@@ -79,12 +79,12 @@ mothership-docking-protocol = "0.3.0"
 
 # Circuit breaking for the Rails RPC caller (fleet convention). `async` gives
 # `AsyncCircuitBreaker`, which never holds its state lock across an await.
-breaker-machines = { version = "0.20.0", features = ["async"] }
+breaker-machines = { version = "0.27.0", features = ["async"] }
 
 # Connection/command admission control (fleet convention). Pure gates: the
 # decision is a function of caller-held state, so `src/ratelimit.rs` owns the
 # per-key table and this crate contributes no locks, tasks, or clock of its own.
-throttle-machines = "0.3.0"
+throttle-machines = "0.6.0"
 
 rcgen = "0.14"
 thiserror = "2.0"

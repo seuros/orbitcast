@@ -2,10 +2,9 @@
 //! limits.
 //!
 //! The decision itself comes from the fleet's `throttle-machines` crate, whose
-//! gates are **pure**: `TokenBucket::check(state, now, params)` returns the
-//! decision plus the next state, and the caller owns the state. That is the
-//! whole reason this module is small - it stores the per-key state in a
-//! `DashMap` and does nothing else.
+//! gates read no clock and keep no state but their own: a `TokenBucket` is
+//! told the time and answers. That is the whole reason this module is small -
+//! it stores one bucket per key in a `DashMap` and does nothing else.
 //!
 //! # Two limiters, one shape
 //!
@@ -34,28 +33,28 @@
 //!
 //! # Clock
 //!
-//! A monotonic [`Instant`] captured at construction, read as seconds. Never
-//! the wall clock: a time step must not hand out a free burst or stall every
+//! A monotonic [`Instant`] captured at construction, read as the time since
+//! then. Never the wall clock: a time step must not hand out a free burst or stall every
 //! bucket.
 
 use std::hash::Hash;
-use std::time::Instant;
+use std::num::NonZeroU64;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use throttle_machines::gate::Gate as _;
-use throttle_machines::token_bucket::{TokenBucket, TokenBucketParams, TokenBucketState};
+use throttle_machines::{Gate as _, TokenBucket, TokenBucketPolicy};
 
 /// Default ceiling on tracked keys, for both limiters.
 ///
-/// 64 Ki entries of `(key, f64, f64)` is a few megabytes - a fixed, documented
-/// bound rather than a tuning knob.
+/// 64 Ki entries of a key and one bucket is a few megabytes - a fixed,
+/// documented bound rather than a tuning knob.
 pub const DEFAULT_CAPACITY: usize = 65_536;
 
 /// A token bucket per key, with a bounded table.
 pub struct KeyedRateLimit<K: Eq + Hash + Clone> {
-    params: TokenBucketParams,
+    policy: TokenBucketPolicy,
     capacity: usize,
-    buckets: DashMap<K, TokenBucketState>,
+    buckets: DashMap<K, TokenBucket>,
     origin: Instant,
 }
 
@@ -67,31 +66,27 @@ impl<K: Eq + Hash + Clone> KeyedRateLimit<K> {
     /// disabled limiter costs no map and no clock read.
     #[must_use]
     pub fn per_minute(rate: u32, capacity: usize) -> Option<Self> {
-        Self::new(f64::from(rate), f64::from(rate) / 60.0, capacity)
+        Self::new(rate, Duration::from_mins(1), capacity)
     }
 
     /// A limiter admitting `rate` events per second, per key.
     #[must_use]
     pub fn per_second(rate: u32, capacity: usize) -> Option<Self> {
-        Self::new(f64::from(rate), f64::from(rate), capacity)
+        Self::new(rate, Duration::from_secs(1), capacity)
     }
 
-    fn new(burst: f64, refill_per_second: f64, capacity: usize) -> Option<Self> {
-        if burst <= 0.0 || refill_per_second <= 0.0 || capacity == 0 {
+    fn new(rate: u32, period: Duration, capacity: usize) -> Option<Self> {
+        if capacity == 0 {
             return None;
         }
+        let policy = TokenBucketPolicy::per(period, NonZeroU64::new(u64::from(rate))?)?;
 
-        Some(Self {
-            params: TokenBucketParams { capacity: burst, refill_rate: refill_per_second },
-            capacity,
-            buckets: DashMap::new(),
-            origin: Instant::now(),
-        })
+        Some(Self { policy, capacity, buckets: DashMap::new(), origin: Instant::now() })
     }
 
     /// Whether one event for `key` is admitted, consuming a token if so.
     pub fn allow(&self, key: K) -> bool {
-        let now = self.origin.elapsed().as_secs_f64();
+        let now = self.origin.elapsed();
 
         // A key already in the table never grows it, so the capacity check only
         // guards genuinely new keys.
@@ -104,15 +99,7 @@ impl<K: Eq + Hash + Clone> KeyedRateLimit<K> {
 
         // The entry guard spans exactly this key's read-modify-write, so two
         // events for one key can never spend the same token.
-        let mut state = self
-            .buckets
-            .entry(key)
-            .or_insert(TokenBucketState { tokens: self.params.capacity, last_refill: now });
-        let decision = TokenBucket::check(*state, now, self.params);
-        *state = decision.state;
-        drop(state);
-
-        decision.allowed
+        self.buckets.entry(key).or_insert(TokenBucket::new(self.policy)).check(now).is_ok()
     }
 
     /// Drop a key's bucket (a session that ended).
@@ -140,19 +127,17 @@ impl<K: Eq + Hash + Clone> KeyedRateLimit<K> {
     ///
     /// A full bucket is indistinguishable from a key that was never seen, so
     /// this frees memory without changing a single future decision.
-    fn sweep_idle(&self, now: f64) {
-        self.buckets.retain(|_, state| {
-            let elapsed = now - state.last_refill;
-            elapsed.mul_add(self.params.refill_rate, state.tokens) < self.params.capacity
-        });
+    fn sweep_idle(&self, now: Duration) {
+        let full = self.policy.capacity().get();
+        self.buckets.retain(|_, bucket| !bucket.peek(now).is_ok_and(|tokens| tokens >= full));
     }
 }
 
 impl<K: Eq + Hash + Clone> std::fmt::Debug for KeyedRateLimit<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyedRateLimit")
-            .field("burst", &self.params.capacity)
-            .field("refill_per_second", &self.params.refill_rate)
+            .field("burst", &self.policy.capacity())
+            .field("refill_every", &self.policy.refill_every())
             .field("tracked", &self.buckets.len())
             .field("capacity", &self.capacity)
             .finish_non_exhaustive()

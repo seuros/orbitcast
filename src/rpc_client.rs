@@ -31,10 +31,11 @@
 //! replayed. Request IDs are for correlation and
 //! deduplication, not for pretending arbitrary Ruby is idempotent.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use breaker_machines::{AsyncCircuitBreaker, CircuitError};
+use breaker_machines::{AsyncCircuitBreaker, CircuitError, Policy, Recovery, Threshold};
 use rama::Service as _;
 use rama::http::body::CollectOptions;
 use rama::http::client::DefaultHttpWebClient;
@@ -74,6 +75,28 @@ pub const DEFAULT_SUCCESS_THRESHOLD: usize = 2;
 
 /// Default ceiling on one reply body, in bytes.
 pub const DEFAULT_MAX_REPLY_BYTES: usize = 2 * 1024 * 1024;
+
+/// The breaker policy `config` asks for: a failure count inside a window
+/// opens the circuit, one probe at a time decides when it closes. Zero counts
+/// and spans are raised to the smallest that means anything.
+fn circuit_policy(config: &RpcConfig) -> Result<Policy, RpcError> {
+    const SHORTEST: Duration = Duration::from_millis(1);
+    let count = |value: usize| {
+        NonZeroU32::new(u32::try_from(value).unwrap_or(u32::MAX)).unwrap_or(NonZeroU32::MIN)
+    };
+    let recovery = Recovery::new(
+        config.half_open_timeout.max(SHORTEST),
+        0.0,
+        count(config.success_threshold),
+        NonZeroU32::MIN,
+    );
+    Threshold::new(Some(count(config.failure_threshold)), None, 0)
+        .zip(recovery)
+        .and_then(|(threshold, recovery)| {
+            Policy::new(threshold, config.failure_window.max(SHORTEST), recovery, None)
+        })
+        .ok_or(RpcError::Config("rpc circuit breaker settings are out of range"))
+}
 
 /// Circuit name used in breaker diagnostics.
 const CIRCUIT_NAME: &str = "orbitcast.rails_rpc";
@@ -158,6 +181,7 @@ impl RpcClient {
     /// `max_concurrency` is zero, or the bearer token is empty or not a valid
     /// HTTP header value.
     pub fn new(config: RpcConfig) -> Result<Self, RpcError> {
+        let policy = circuit_policy(&config)?;
         // Trim in place: the configured URL is owned, so no second copy.
         let mut endpoint = config.endpoint_url;
         endpoint.truncate(endpoint.trim_end_matches('/').len());
@@ -182,12 +206,7 @@ impl RpcClient {
                 .map_err(|_| RpcError::Config("rpc bearer token is not a valid header value"))?;
         authorization.set_sensitive(true);
 
-        let breaker = AsyncCircuitBreaker::builder(CIRCUIT_NAME)
-            .failure_threshold(config.failure_threshold.max(1))
-            .failure_window_secs(config.failure_window.as_secs_f64().max(0.001))
-            .half_open_timeout_secs(config.half_open_timeout.as_secs_f64().max(0.001))
-            .success_threshold(config.success_threshold.max(1))
-            .build_async();
+        let breaker = AsyncCircuitBreaker::new(CIRCUIT_NAME, policy);
 
         Ok(Self {
             endpoint,
@@ -228,7 +247,7 @@ impl RpcClient {
 
     /// The breaker's current state name (`closed`, `open`, `half_open`).
     pub fn circuit_state(&self) -> &'static str {
-        self.breaker.state_name()
+        self.breaker.state().name()
     }
 
     /// Run the `describe` handshake and judge the endpoint's answer.
