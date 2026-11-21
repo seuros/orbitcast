@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/seuros/orbitcast/compare/v0.3.4...v0.3.5) (2026-11-21)
+
+
+### Bug Fixes
+
+* **postgres:** move to sqlx with rustls, drop tokio-postgres and native-tls ([6d28639](https://github.com/seuros/orbitcast/commit/6d28639daa41aec5d08e49965e531c922b38e338))
+
 ## [0.3.4](https://github.com/seuros/orbitcast/compare/v0.3.3...v0.3.4) (2026-11-18)
 
 
