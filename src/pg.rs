@@ -1,58 +1,35 @@
 //! PostgreSQL plumbing shared by the pub/sub, broker, and presence backends.
 //!
-//! - [`connect_with_sslmode`] honours the DSN's `sslmode` the way libpq does
-//!   (`disable`, `allow`, `prefer`, `require`, `verify-*`; default `prefer`).
-//! - [`PgSlot`] is one persistent session: a single client serialized by a
-//!   mutex and reopened when its connection dies. Each backend layers its own
+//! - [`connect_with_sslmode`] and [`listen_with_sslmode`] honour the DSN's
+//!   `sslmode` (see [`SslMode`]; default `prefer`).
+//! - [`PgSlot`] is one persistent session: a single connection serialized by
+//!   a mutex and reopened when it breaks. Each backend layers its own
 //!   reconnect-once retry and error type on top.
 //! - [`describe_pg_error`] adds a backend's migration hint to a missing-table
 //!   error.
+//!
+//! # TLS
+//!
+//! rustls with the platform's native root store. Every TLS attempt verifies
+//! the server certificate against those roots and, except under
+//! `verify-ca`, the host name: the checks the system TLS library made before
+//! this crate moved to rustls. `require` therefore verifies like
+//! `verify-full` (stricter than libpq, unchanged from earlier releases), and a
+//! `sslrootcert` in the DSN adds its CAs to the native roots.
 
-use std::task::{Context, Poll};
+use std::borrow::Cow;
+use std::future::Future;
+use std::str::FromStr;
 
-use native_tls::TlsConnector;
-use postgres_native_tls::{MakeTlsConnector, TlsStream};
+use sqlx::ConnectOptions as _;
+use sqlx::Connection as _;
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgListener, PgPoolOptions, PgSslMode};
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
-use tokio_postgres::{AsyncMessage, NoTls};
 use tracing::warn;
 
-type TlsConnection =
-    tokio_postgres::Connection<tokio_postgres::Socket, TlsStream<tokio_postgres::Socket>>;
-type NoTlsConnection =
-    tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>;
-
-/// The connection half of a client, whichever transport it negotiated.
-pub enum PgConnection {
-    Tls(TlsConnection),
-    NoTls(NoTlsConnection),
-}
-
-impl PgConnection {
-    /// Poll for the next asynchronous message (a notification or notice),
-    /// driving the connection as a side effect.
-    pub fn poll_message(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<AsyncMessage, tokio_postgres::Error>>> {
-        match self {
-            Self::Tls(conn) => conn.poll_message(cx),
-            Self::NoTls(conn) => conn.poll_message(cx),
-        }
-    }
-
-    /// Drive the connection until it closes.
-    ///
-    /// # Errors
-    ///
-    /// The I/O or protocol error that ended the connection.
-    pub async fn run(self) -> Result<(), tokio_postgres::Error> {
-        match self {
-            Self::Tls(conn) => conn.await,
-            Self::NoTls(conn) => conn.await,
-        }
-    }
-}
+/// SQLSTATE `undefined_table`.
+const UNDEFINED_TABLE: &str = "42P01";
 
 /// A DSN's `sslmode`, as libpq spells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,55 +65,131 @@ pub fn sslmode_from_url(connection_string: &str) -> Option<SslMode> {
     }
 }
 
-async fn connect_tls(
-    connection_string: &str,
-) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
-    let connector = TlsConnector::builder().build()?;
-    let tls = MakeTlsConnector::new(connector);
-    let (client, connection) = tokio_postgres::connect(connection_string, tls).await?;
-    Ok((client, PgConnection::Tls(connection)))
+/// One way of reaching the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Plain,
+    /// TLS, the certificate verified against the trusted roots and, with
+    /// `verify_host`, issued to the host connected to.
+    Tls {
+        verify_host: bool,
+    },
 }
 
-async fn connect_no_tls(
-    connection_string: &str,
-) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
-    let (client, connection) = tokio_postgres::connect(connection_string, NoTls).await?;
-    Ok((client, PgConnection::NoTls(connection)))
+impl Transport {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "non-TLS",
+            Self::Tls { .. } => "TLS",
+        }
+    }
+
+    const fn ssl_mode(self) -> PgSslMode {
+        match self {
+            Self::Plain => PgSslMode::Disable,
+            Self::Tls { verify_host: true } => PgSslMode::VerifyFull,
+            Self::Tls { verify_host: false } => PgSslMode::VerifyCa,
+        }
+    }
 }
 
-/// Connect, honouring the DSN's `sslmode` (default `prefer`).
+/// The transports `mode` tries, in order.
 ///
 /// `allow` tries plain text first and falls back to TLS; `prefer` the reverse;
 /// `require` and the `verify-*` modes accept TLS only.
+const fn transports(mode: SslMode) -> &'static [Transport] {
+    const VERIFIED: Transport = Transport::Tls { verify_host: true };
+    match mode {
+        SslMode::Disable => &[Transport::Plain],
+        SslMode::Allow => &[Transport::Plain, VERIFIED],
+        SslMode::Prefer => &[VERIFIED, Transport::Plain],
+        SslMode::Require | SslMode::VerifyFull => &[VERIFIED],
+        SslMode::VerifyCa => &[Transport::Tls { verify_host: false }],
+    }
+}
+
+/// The DSN as connect options, before a transport is chosen.
+///
+/// Statements are never cached server-side (each runs as an unnamed
+/// statement, so a transaction pooler never sees a prepared statement it does
+/// not know), and the driver's own statement log is off: every backend logs
+/// its operations itself, never their SQL.
+fn base_options(connection_string: &str) -> anyhow::Result<PgConnectOptions> {
+    Ok(PgConnectOptions::from_str(connection_string)?
+        .statement_cache_capacity(0)
+        .disable_statement_logging())
+}
+
+/// Run `connect` once per transport the DSN's `sslmode` allows (default
+/// `prefer`), returning the first success.
 ///
 /// # Errors
 ///
-/// The connection error; when both transports were tried, both errors.
-pub async fn connect_with_sslmode(
-    connection_string: &str,
-) -> anyhow::Result<(tokio_postgres::Client, PgConnection)> {
-    match sslmode_from_url(connection_string).unwrap_or(SslMode::Prefer) {
-        SslMode::Disable => connect_no_tls(connection_string).await,
-        SslMode::Allow => match connect_no_tls(connection_string).await {
-            Ok(conn) => Ok(conn),
-            Err(no_tls_err) => connect_tls(connection_string).await.map_err(|tls_err| {
-                anyhow::anyhow!(
-                    "non-TLS connection failed ({no_tls_err}); TLS connection failed ({tls_err})"
-                )
-            }),
-        },
-        SslMode::Prefer => match connect_tls(connection_string).await {
-            Ok(conn) => Ok(conn),
-            Err(tls_err) => connect_no_tls(connection_string).await.map_err(|no_tls_err| {
-                anyhow::anyhow!(
-                    "TLS connection failed ({tls_err}); non-TLS connection failed ({no_tls_err})"
-                )
-            }),
-        },
-        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
-            connect_tls(connection_string).await
+/// An unparseable DSN, or the connection error; when two transports were
+/// tried, both errors.
+async fn with_sslmode<T, F, Fut>(connection_string: &str, mut connect: F) -> anyhow::Result<T>
+where
+    F: FnMut(PgConnectOptions) -> Fut,
+    Fut: Future<Output = Result<T, sqlx::Error>>,
+{
+    let base = base_options(connection_string)?;
+    let mode = sslmode_from_url(connection_string).unwrap_or(SslMode::Prefer);
+
+    let mut failures: Vec<String> = Vec::new();
+    for &transport in transports(mode) {
+        match connect(base.clone().ssl_mode(transport.ssl_mode())).await {
+            Ok(value) => return Ok(value),
+            Err(error) if transports(mode).len() == 1 => return Err(error.into()),
+            Err(error) => {
+                failures.push(format!("{} connection failed ({error})", transport.label()));
+            }
         }
     }
+    Err(anyhow::anyhow!(failures.join("; ")))
+}
+
+/// Connect one session, honouring the DSN's `sslmode` (default `prefer`).
+///
+/// # Errors
+///
+/// See [`with_sslmode`].
+pub async fn connect_with_sslmode(connection_string: &str) -> anyhow::Result<PgConnection> {
+    with_sslmode(connection_string, |options| async move { options.connect().await }).await
+}
+
+/// Open a `LISTEN` session, honouring the DSN's `sslmode` (default `prefer`).
+///
+/// [`PgListener`] needs a pool to draw its connection from. The pool holds at
+/// most that one connection, never expires it, and is never asked for another:
+/// the listener does not reconnect by itself (`eager_reconnect(false)`), so a
+/// lost connection surfaces as `Ok(None)` from [`PgListener::try_recv`] and
+/// the caller's supervisor owns reconnect and backoff.
+///
+/// The transport is chosen with a direct connection first: the pool retries a
+/// refused connection until its acquire timeout and then reports only the
+/// timeout, which would hide the real error and stall the `prefer`/`allow`
+/// fallback.
+///
+/// # Errors
+///
+/// See [`with_sslmode`].
+pub async fn listen_with_sslmode(connection_string: &str) -> anyhow::Result<PgListener> {
+    with_sslmode(connection_string, |options| async move {
+        options.connect().await?.close().await?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .max_lifetime(None)
+            .idle_timeout(None)
+            .connect_with(options)
+            .await?;
+        let mut listener = PgListener::connect_with(&pool).await?;
+        listener.ignore_pool_close_event(true);
+        listener.eager_reconnect(false);
+        Ok(listener)
+    })
+    .await
 }
 
 /// Aborts a background task when the owner is dropped.
@@ -148,46 +201,82 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Whether PostgreSQL itself reported `error` (a missing table, a constraint
+/// violation): the session is fine and re-running would fail the same way.
+/// Everything else - I/O, TLS, protocol, decoding - may be a dead session.
+#[must_use]
+pub const fn is_server_error(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(_))
+}
+
+/// Whether `error` means the connection itself can no longer be used.
+const fn is_transport_error(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::WorkerCrashed
+            | sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+    )
+}
+
+/// The SQLSTATE of a server-reported error.
+#[must_use]
+pub fn sqlstate(error: &sqlx::Error) -> Option<Cow<'_, str>> {
+    error.as_database_error().and_then(sqlx::error::DatabaseError::code)
+}
+
 /// Render a PostgreSQL error, prefixed with the backend's migration hint when
 /// the error is a missing table.
 pub fn describe_pg_error(
-    error: &tokio_postgres::Error,
+    error: &sqlx::Error,
     missing_table_hint: impl FnOnce() -> String,
 ) -> String {
-    match error.code() {
-        Some(code) if *code == tokio_postgres::error::SqlState::UNDEFINED_TABLE => {
-            format!("{}: {error}", missing_table_hint())
-        }
+    match sqlstate(error) {
+        Some(code) if code == UNDEFINED_TABLE => format!("{}: {error}", missing_table_hint()),
         _ => error.to_string(),
     }
 }
 
-/// A client plus the task driving its connection; dropping it ends both.
+/// One open connection, plus whether a statement found it broken.
 pub struct OpenClient {
-    pub client: tokio_postgres::Client,
-    _driver: AbortOnDrop,
+    pub client: PgConnection,
+    role: &'static str,
+    broken: bool,
 }
 
 impl OpenClient {
-    /// Connect and spawn the connection driver. `role` names the session in
-    /// the warning logged if the connection fails.
+    /// Connect. `role` names the session in the warning logged if it breaks.
     ///
     /// # Errors
     ///
     /// Whatever [`connect_with_sslmode`] reports.
     pub async fn connect(database_url: &str, role: &'static str) -> anyhow::Result<Self> {
-        let (client, connection) = connect_with_sslmode(database_url).await?;
-        let driver = tokio::spawn(async move {
-            if let Err(e) = connection.run().await {
-                warn!(error = %e, role, "PostgreSQL session connection closed");
-            }
-        });
-        Ok(Self { client, _driver: AbortOnDrop(driver) })
+        Ok(Self { client: connect_with_sslmode(database_url).await?, role, broken: false })
+    }
+
+    /// Pass a statement's result through, remembering a transport failure so
+    /// the next [`PgSlot::acquire`] reconnects before handing the session out.
+    ///
+    /// # Errors
+    ///
+    /// `result`'s own error, unchanged.
+    pub fn note<T>(&mut self, result: Result<T, sqlx::Error>) -> Result<T, sqlx::Error> {
+        if let Err(error) = &result
+            && is_transport_error(error)
+            && !self.broken
+        {
+            self.broken = true;
+            warn!(error = %error, role = self.role, "PostgreSQL session connection closed");
+        }
+        result
     }
 }
 
-/// One persistent PostgreSQL session: a single client serialized by a mutex,
-/// reopened when its connection dies.
+/// One persistent PostgreSQL session: a single connection serialized by a
+/// mutex, reopened when it breaks.
 ///
 /// The mutex is what lets a caller run a multi-statement transaction without
 /// another caller's statement interleaving on the same connection.
@@ -208,21 +297,22 @@ impl PgSlot {
         Ok(Self { database_url, role, open: Mutex::new(open) })
     }
 
-    /// Lock the session, reconnecting first if its connection has closed.
+    /// Lock the session, reconnecting first if a statement found it broken
+    /// (see [`OpenClient::note`]).
     ///
     /// # Errors
     ///
-    /// A failed reconnect. The dead client stays in place, so the next call
-    /// tries again.
+    /// A failed reconnect. The broken connection stays in place, so the next
+    /// call tries again.
     pub async fn acquire(&self) -> anyhow::Result<MutexGuard<'_, OpenClient>> {
         let mut open = self.open.lock().await;
-        if open.client.is_closed() {
+        if open.broken {
             self.reopen(&mut open).await?;
         }
         Ok(open)
     }
 
-    /// Replace a locked client with a fresh connection.
+    /// Replace a locked connection with a fresh one.
     ///
     /// # Errors
     ///

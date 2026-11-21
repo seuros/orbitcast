@@ -450,9 +450,12 @@ pub async fn probe_database(url: &str, timeout: Duration) -> Database {
 
 #[cfg(all(feature = "postgres", not(feature = "memory")))]
 async fn query_server_version(url: &str) -> anyhow::Result<String> {
-    let open = crate::pg::OpenClient::connect(url, "doctor").await?;
-    let row = open.client.query_one("SHOW server_version", &[]).await?;
-    Ok(row.try_get::<_, String>(0)?)
+    let mut client = crate::pg::connect_with_sslmode(url).await?;
+    let version =
+        sqlx::query_scalar::<_, String>("SHOW server_version").fetch_one(&mut client).await?;
+    // The answer is in hand; a failed goodbye changes nothing about it.
+    let _ = sqlx::Connection::close(client).await;
+    Ok(version)
 }
 
 /// Remove the password of `url` from `text`, should a driver echo it.

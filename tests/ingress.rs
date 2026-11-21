@@ -332,9 +332,12 @@ mod memory_ingress {
 #[cfg(all(feature = "postgres", not(feature = "memory")))]
 mod postgres_control {
     use std::collections::HashMap;
+    use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
 
+    use sqlx::Connection as _;
+    use sqlx::postgres::{PgConnectOptions, PgConnection, PgSslMode};
     use tokio::sync::mpsc;
 
     use orbitcast::config::{Config, HttpConfig, IngressSettings};
@@ -441,26 +444,22 @@ mod postgres_control {
     }
 
     /// A raw client for issuing the Ruby-style `pg_notify`.
-    async fn raw_client() -> tokio_postgres::Client {
-        let (client, connection) =
-            tokio_postgres::connect(&integration_dsn(), tokio_postgres::NoTls)
-                .await
-                .expect("connect to DATABASE_URL (NoTls; use a non-TLS DSN for these tests)");
-        tokio::spawn(async move {
-            // The connection ends with the client at test end; a failure
-            // before that already fails the query that hit it.
-            if let Err(e) = connection.await {
-                eprintln!("pg_notify connection ended: {e}");
-            }
-        });
-        client
+    async fn raw_client() -> PgConnection {
+        let options = PgConnectOptions::from_str(&integration_dsn())
+            .expect("DATABASE_URL")
+            .ssl_mode(PgSslMode::Disable);
+        PgConnection::connect_with(&options)
+            .await
+            .expect("connect to DATABASE_URL (no TLS; use a non-TLS DSN for these tests)")
     }
 
     /// Publish one control message the way `Orbitcast::Publisher::Control`
     /// does: `SELECT pg_notify(channel_for(ns, CONTROL_STREAM), message.to_json)`.
-    async fn notify_control(client: &tokio_postgres::Client, ns: &str, wire: &str) {
-        client
-            .execute("SELECT pg_notify($1, $2)", &[&control_channel_for(ns), &wire])
+    async fn notify_control(client: &mut PgConnection, ns: &str, wire: &str) {
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(control_channel_for(ns))
+            .bind(wire)
+            .execute(client)
             .await
             .expect("pg_notify");
     }
@@ -522,10 +521,10 @@ mod postgres_control {
         // Drain the welcomes.
         while rx.try_recv().is_ok() {}
 
-        let client = raw_client().await;
+        let mut client = raw_client().await;
         let control = ControlMessage::disconnect(&ns, "user:7", "remote", false);
         let wire = serde_json::to_string(&control).unwrap();
-        notify_control(&client, &ns, &wire).await;
+        notify_control(&mut client, &ns, &wire).await;
 
         let (frame, conn_id) = expect_disconnect(&mut rx).await;
         assert_eq!(conn_id, 1, "only the matching identity is disconnected");
@@ -533,10 +532,10 @@ mod postgres_control {
         assert_eq!(frame["reconnect"], false);
 
         // Duplicate control_id: consumed, never applied twice.
-        notify_control(&client, &ns, &wire).await;
+        notify_control(&mut client, &ns, &wire).await;
         // An unknown identity key: a logged no-op.
         let stranger = ControlMessage::disconnect(&ns, "user:404", "remote", true);
-        notify_control(&client, &ns, &serde_json::to_string(&stranger).unwrap()).await;
+        notify_control(&mut client, &ns, &serde_json::to_string(&stranger).unwrap()).await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut leftovers = Vec::new();
@@ -578,10 +577,10 @@ mod postgres_control {
         connections.hub().set_identifier(1, "user:7".to_string()).expect("live");
         while rx.try_recv().is_ok() {}
 
-        let client = raw_client().await;
+        let mut client = raw_client().await;
         let other_ns = format!("{ns}_other");
         let control = ControlMessage::disconnect(&other_ns, "user:7", "remote", false);
-        notify_control(&client, &other_ns, &serde_json::to_string(&control).unwrap()).await;
+        notify_control(&mut client, &other_ns, &serde_json::to_string(&control).unwrap()).await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(rx.try_recv().is_err(), "a foreign-namespace control must not arrive");

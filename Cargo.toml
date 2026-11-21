@@ -27,7 +27,7 @@ categories = ["network-programming", "web-programming::websocket", "asynchronous
 
 [features]
 default = ["postgres"]
-postgres = ["dep:tokio-postgres", "dep:postgres-native-tls", "dep:native-tls"]
+postgres = ["dep:sqlx"]
 memory = []
 # Future backends:
 # redis = ["dep:redis"]
@@ -92,10 +92,14 @@ dashmap = "6.2"
 uuid = { version = "1.27", features = ["v4"] }
 async-trait = "0.1"
 
-# PostgreSQL (optional, default)
-tokio-postgres = { version = "0.7", optional = true }
-postgres-native-tls = { version = "0.5.3", optional = true }
-native-tls = { version = "0.2", features = ["vendored"], optional = true }
+# PostgreSQL (optional, default). rustls on ring (already in the tree through
+# rama) with the platform's native root store, the same roots the system TLS
+# library trusted before: no OpenSSL, nothing to vendor for musl or zigbuild.
+sqlx = { version = "0.9.1", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+], optional = true }
 bytes = "1"
 
 [dev-dependencies]

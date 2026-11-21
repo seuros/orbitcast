@@ -1,8 +1,8 @@
 use std::assert_matches;
 
 use super::test_support::{
-    integration_client, integration_dsn, integration_namespace, spawn_event_listener,
-    spawn_listener,
+    batch_execute, integration_client, integration_dsn, integration_namespace,
+    spawn_event_listener, spawn_listener,
 };
 use super::*;
 use crate::protocol::v1::publication::MAX_NOTIFY_PAYLOAD_LEN;
@@ -10,6 +10,12 @@ use crate::pubsub::DEFAULT_OVERFLOW_TTL;
 use crate::pubsub::PubSubEvent;
 
 const NAMESPACE: &str = "example_production";
+
+/// How [`PgListener::listen`] spells a `LISTEN` target: a double-quoted
+/// identifier with embedded quotes doubled.
+fn quote_channel(channel: &str) -> String {
+    format!("\"{}\"", channel.replace('"', "\"\""))
+}
 
 async fn integration_backend(label: &str) -> PostgresPubSub {
     PostgresPubSub::connect(PostgresConfig::new(integration_dsn(), integration_namespace(label)))
@@ -32,28 +38,28 @@ async fn integration_overflow_backend(label: &str, ttl: Duration) -> PostgresPub
 /// Shared by every integration test in this process; rows stay isolated
 /// because each test publishes in its own namespace.
 async fn ensure_overflow_table() {
-    let client = integration_client().await;
+    let mut client = integration_client().await;
 
     // Parallel `CREATE TABLE IF NOT EXISTS` can still collide in pg_type,
     // so the postcondition - not this statement's result - is the check.
-    let attempted = client
-        .batch_execute(
-            "CREATE TABLE IF NOT EXISTS orbitcast_payloads (
-                     id uuid PRIMARY KEY,
-                     namespace text NOT NULL,
-                     stream text NOT NULL,
-                     json_payload text NOT NULL,
-                     expires_at timestamptz NOT NULL);
-                 CREATE INDEX IF NOT EXISTS index_orbitcast_payloads_on_expires_at
-                     ON orbitcast_payloads (expires_at);",
-        )
-        .await;
+    let attempted = batch_execute(
+        &mut client,
+        "CREATE TABLE IF NOT EXISTS orbitcast_payloads (
+                 id uuid PRIMARY KEY,
+                 namespace text NOT NULL,
+                 stream text NOT NULL,
+                 json_payload text NOT NULL,
+                 expires_at timestamptz NOT NULL);
+             CREATE INDEX IF NOT EXISTS index_orbitcast_payloads_on_expires_at
+                 ON orbitcast_payloads (expires_at);",
+    )
+    .await;
 
-    let present: Option<String> = client
-        .query_one("SELECT to_regclass('orbitcast_payloads')::text", &[])
-        .await
-        .expect("query to_regclass")
-        .get(0);
+    let present: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('orbitcast_payloads')::text")
+            .fetch_one(&mut client)
+            .await
+            .expect("query to_regclass");
     assert!(present.is_some(), "relay table must exist for overflow tests: {attempted:?}");
 }
 
@@ -96,9 +102,13 @@ fn config_accepts_defaults() {
     assert_eq!(config.keepalive_interval, DEFAULT_KEEPALIVE_INTERVAL);
 }
 
+/// Derived channel names never need escaping, so the `LISTEN` the listener
+/// sends is exactly `LISTEN "<channel>"` - which `reconnect_reestablishes_every_interest`
+/// matches in `pg_stat_activity`.
 #[test]
 fn channels_are_quoted_identifiers() {
     let channel = channel_for(NAMESPACE, "chat:42");
+    assert!(channel.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'), "{channel}");
     assert_eq!(quote_channel(&channel), format!("\"{channel}\""));
     assert_eq!(format!("LISTEN {}", quote_channel(&channel)), format!("LISTEN \"{channel}\""));
 }
@@ -193,18 +203,17 @@ async fn subscribe_after_idle_keepalives_is_acknowledged_and_delivered() {
     // Only the listener's keepalive issues `SELECT 1` (the publisher has run
     // nothing yet), so seeing it as a tagged session's last statement proves
     // a probe completed - however early the first one fired.
-    let observer = integration_client().await;
+    let mut observer = integration_client().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let probed: i64 = observer
-                .query_one(
-                    "SELECT count(*) FROM pg_stat_activity \
-                         WHERE application_name = $1 AND query = 'SELECT 1'",
-                    &[&namespace],
-                )
-                .await
-                .expect("query pg_stat_activity")
-                .get(0);
+            let probed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                     WHERE application_name = $1 AND query = 'SELECT 1'",
+            )
+            .bind(&namespace)
+            .fetch_one(&mut observer)
+            .await
+            .expect("query pg_stat_activity");
             if probed > 0 {
                 break;
             }
@@ -300,14 +309,8 @@ async fn reconnect_reestablishes_every_interest() {
         quote_channel(&channel_for(&namespace, "chat:42")),
         quote_channel(&channel_for(&namespace, "chat:43")),
     );
-    backend
-        .publisher
-        .slot
-        .acquire()
-        .await
-        .expect("publisher session")
-        .client
-        .execute(kill_sql.as_str(), &[])
+    sqlx::query(sqlx::AssertSqlSafe(kill_sql))
+        .execute(&mut backend.publisher.slot.acquire().await.expect("publisher session").client)
         .await
         .unwrap();
 
@@ -378,22 +381,23 @@ async fn overflow_publish_stores_one_row_matching_the_table_contract() {
     let payload = relay_sized_payload("stored");
     backend.publish("chat:42", &payload).await.unwrap();
 
-    let client = integration_client().await;
-    let row = client
-        .query_one(
-            "SELECT stream, json_payload, expires_at > now() AS live \
-                 FROM orbitcast_payloads WHERE namespace = $1",
-            &[&namespace],
-        )
-        .await
-        .expect("exactly one relay row for this namespace");
+    let mut client = integration_client().await;
+    let (stream, json_payload, live): (String, String, bool) = sqlx::query_as(
+        "SELECT stream, json_payload, expires_at > now() AS live \
+             FROM orbitcast_payloads WHERE namespace = $1",
+    )
+    .bind(&namespace)
+    .fetch_one(&mut client)
+    .await
+    .expect("exactly one relay row for this namespace");
 
-    assert_eq!(row.get::<_, String>("stream"), "chat:42");
-    assert_eq!(row.get::<_, String>("json_payload"), payload);
-    assert!(row.get::<_, bool>("live"), "expires_at comes from the database clock");
+    assert_eq!(stream, "chat:42");
+    assert_eq!(json_payload, payload);
+    assert!(live, "expires_at comes from the database clock");
 
-    client
-        .execute("DELETE FROM orbitcast_payloads WHERE namespace = $1", &[&namespace])
+    sqlx::query("DELETE FROM orbitcast_payloads WHERE namespace = $1")
+        .bind(&namespace)
+        .execute(&mut client)
         .await
         .unwrap();
 }
@@ -526,23 +530,20 @@ async fn cleanup_racing_a_fetch_is_a_gap_that_names_the_stream() {
     let channel = channel_for(&namespace, "chat:42");
 
     let mut client = integration_client().await;
-    let transaction = client.transaction().await.unwrap();
-    transaction
-        .execute(
-            OVERFLOW_INSERT_SQL,
-            &[
-                &publication.id,
-                &publication.namespace,
-                &publication.stream,
-                &publication.json_payload,
-                &300_000_i64,
-            ],
-        )
+    let mut transaction = sqlx::Connection::begin(&mut client).await.unwrap();
+    sqlx::query(OVERFLOW_INSERT_SQL)
+        .bind(&publication.id)
+        .bind(&publication.namespace)
+        .bind(&publication.stream)
+        .bind(&publication.json_payload)
+        .bind(300_000_i64)
+        .execute(&mut *transaction)
         .await
         .unwrap();
-    transaction.execute(NOTIFY_SQL, &[&channel, &notice]).await.unwrap();
-    transaction
-        .execute("DELETE FROM orbitcast_payloads WHERE id = $1::text::uuid", &[&publication.id])
+    sqlx::query(NOTIFY_SQL).bind(&channel).bind(&notice).execute(&mut *transaction).await.unwrap();
+    sqlx::query("DELETE FROM orbitcast_payloads WHERE id = $1::text::uuid")
+        .bind(&publication.id)
+        .execute(&mut *transaction)
         .await
         .unwrap();
     transaction.commit().await.unwrap();

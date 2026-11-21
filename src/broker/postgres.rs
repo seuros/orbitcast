@@ -71,14 +71,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio_postgres::error::SqlState;
+use sqlx::Row as _;
+use sqlx::postgres::{PgConnection, PgRow};
 use tracing::{debug, info, warn};
 
 use crate::broker::{
     Broker, BrokerConfig, BrokerError, BrokerStats, DuplicateKind, MESSAGES_TABLE, POSITIONS_TABLE,
     REPLAY_BATCH, Retained, RetainedMessage, SESSIONS_TABLE, StreamRange,
 };
-use crate::pg::{AbortOnDrop, PgSlot, describe_pg_error};
+use crate::pg::{AbortOnDrop, OpenClient, PgSlot, describe_pg_error, is_server_error, sqlstate};
 use crate::protocol::v1::publication::Publication;
 use crate::protocol::v1::recovery::{Cursor, SessionSnapshot};
 use crate::protocol::v1::validate_namespace;
@@ -243,9 +244,21 @@ const BUMP_GENERATION_SQL: &str = "UPDATE orbitcast_stream_positions \
      SET generation = generation + 1, next_seq = 1, updated_at = now() \
      WHERE namespace = $1 AND stream = $2 AND generation = $3::bigint";
 
+/// SQLSTATE `undefined_column`.
+const UNDEFINED_COLUMN: &str = "42703";
+
 /// A `bigint` column read as the non-negative count it is.
-fn unsigned(row: &tokio_postgres::Row, index: usize) -> u64 {
-    row.get::<_, i64>(index).max(0).cast_unsigned()
+fn unsigned(row: &PgRow, index: usize) -> Result<u64, BrokerError> {
+    Ok(column::<i64>(row, index)?.max(0).cast_unsigned())
+}
+
+/// One column of a broker row, or the error that names it.
+fn column<'r, T>(row: &'r PgRow, index: usize) -> Result<T, BrokerError>
+where
+    T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    row.try_get(index)
+        .map_err(|e| BrokerError::Backend(anyhow::anyhow!("unreadable broker column {index}: {e}")))
 }
 
 /// What to tell an operator whose broker tables do not exist.
@@ -268,11 +281,9 @@ fn stale_schema_hint() -> String {
 }
 
 /// Render one server-reported broker failure with the migration it points at.
-fn describe_broker_error(error: &tokio_postgres::Error) -> String {
-    match error.code() {
-        Some(code) if *code == SqlState::UNDEFINED_COLUMN => {
-            format!("{}: {error}", stale_schema_hint())
-        }
+fn describe_broker_error(error: &sqlx::Error) -> String {
+    match sqlstate(error) {
+        Some(code) if code == UNDEFINED_COLUMN => format!("{}: {error}", stale_schema_hint()),
         _ => describe_pg_error(error, missing_table_hint),
     }
 }
@@ -356,18 +367,15 @@ macro_rules! on_pool {
         let mut guard = link.acquire().await?;
 
         let first = {
-            let $client = &mut guard.client;
-            match $body.await {
-                Ok(value) => Ok(value),
-                Err(error) => Err(error),
-            }
+            let $client: &mut PgConnection = &mut guard.client;
+            $body.await
         };
 
         // The session stays locked through the retry: a reconnect replaces
         // the client this caller holds, never one another caller is using.
-        let outcome = match first {
+        let outcome = match guard.note(first) {
             Ok(value) => Ok(value),
-            Err(error) if error.code().is_some() => Err(BrokerError::Backend(anyhow::anyhow!(
+            Err(error) if is_server_error(&error) => Err(BrokerError::Backend(anyhow::anyhow!(
                 "{} failed: {}",
                 $what,
                 describe_broker_error(&error)
@@ -379,8 +387,11 @@ macro_rules! on_pool {
                     "Broker session failed; reconnecting once"
                 );
                 link.reopen(&mut guard).await?;
-                let $client = &mut guard.client;
-                $body.await.map_err(|retry| {
+                let retried = {
+                    let $client: &mut PgConnection = &mut guard.client;
+                    $body.await
+                };
+                guard.note(retried).map_err(|retry| {
                     BrokerError::Backend(anyhow::anyhow!(
                         "{} failed after reconnect ({}); first attempt: {error}",
                         $what,
@@ -479,9 +490,9 @@ struct RetainRequest<'a> {
 
 /// The whole ordering transaction, as one unit.
 async fn retain_tx(
-    client: &mut tokio_postgres::Client,
+    client: &mut PgConnection,
     request: &RetainRequest<'_>,
-) -> Result<Retained, tokio_postgres::Error> {
+) -> Result<Retained, sqlx::Error> {
     let RetainRequest {
         namespace,
         publication,
@@ -496,22 +507,30 @@ async fn retain_tx(
 
     // Dropping an uncommitted transaction rolls it back, which also releases
     // the sequence it took: numbering stays contiguous.
-    let transaction = client.transaction().await?;
+    let mut transaction = sqlx::Connection::begin(client).await?;
 
-    transaction.execute(ENSURE_POSITION_SQL, &[&namespace, &stream]).await?;
+    sqlx::query(ENSURE_POSITION_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .execute(&mut *transaction)
+        .await?;
 
-    let position = transaction.query_one(LOCK_POSITION_SQL, &[&namespace, &stream]).await?;
-    let generation: i64 = position.get(0);
-    let next_seq: i64 = position.get(1);
+    let (generation, next_seq): (i64, i64) = sqlx::query_as(LOCK_POSITION_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .fetch_one(&mut *transaction)
+        .await?;
 
     // Deduplication happens under the lock, so a racing retry of the same
     // publication cannot be assigned a second sequence.
-    if let Some(existing) =
-        transaction.query_opt(FIND_PUBLICATION_SQL, &[&namespace, &stream, &publication_id]).await?
+    if let Some((existing_generation, existing_seq, existing_payload)) =
+        sqlx::query_as::<_, (i64, i64, String)>(FIND_PUBLICATION_SQL)
+            .bind(namespace)
+            .bind(stream)
+            .bind(publication_id)
+            .fetch_optional(&mut *transaction)
+            .await?
     {
-        let existing_generation: i64 = existing.get(0);
-        let existing_seq: i64 = existing.get(1);
-        let existing_payload: String = existing.get(2);
         transaction.commit().await?;
         let kind = if existing_payload == publication.json_payload {
             DuplicateKind::Identical
@@ -528,47 +547,59 @@ async fn retain_tx(
         });
     }
 
-    transaction
-        .execute(
-            INSERT_MESSAGE_SQL,
-            &[
-                &namespace,
-                &stream,
-                &generation,
-                &next_seq,
-                &publication_id,
-                &publication.json_payload,
-                &retention_ms,
-            ],
-        )
+    sqlx::query(INSERT_MESSAGE_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .bind(generation)
+        .bind(next_seq)
+        .bind(publication_id)
+        .bind(&publication.json_payload)
+        .bind(retention_ms)
+        .execute(&mut *transaction)
         .await?;
 
     let bumped = next_seq + 1;
-    transaction.execute(BUMP_POSITION_SQL, &[&namespace, &stream, &bumped]).await?;
+    sqlx::query(BUMP_POSITION_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .bind(bumped)
+        .execute(&mut *transaction)
+        .await?;
 
     // Count bound: drop everything older than the window, bounded so a lowered
     // limit drains over several publishes instead of one long statement.
     let ceiling = next_seq - max_messages;
     if ceiling > 0 {
         let floor = (ceiling - COUNT_TRIM_WINDOW).max(0);
-        transaction
-            .execute(TRIM_COUNT_SQL, &[&namespace, &stream, &generation, &ceiling, &floor])
+        sqlx::query(TRIM_COUNT_SQL)
+            .bind(namespace)
+            .bind(stream)
+            .bind(generation)
+            .bind(ceiling)
+            .bind(floor)
+            .execute(&mut *transaction)
             .await?;
     }
 
     // Oversized: the live listeners read the relay row the notice references,
     // committed together with the retained row so neither can exist alone.
     if let Some(row) = &prepared.relay_row {
-        transaction
-            .execute(
-                OVERFLOW_INSERT_SQL,
-                &[&row.id, &row.namespace, &row.stream, &row.json_payload, &relay_ttl_ms],
-            )
+        sqlx::query(OVERFLOW_INSERT_SQL)
+            .bind(&row.id)
+            .bind(&row.namespace)
+            .bind(&row.stream)
+            .bind(&row.json_payload)
+            .bind(relay_ttl_ms)
+            .execute(&mut *transaction)
             .await?;
     }
 
     // Visible on commit, never before.
-    transaction.execute(NOTIFY_SQL, &[&prepared.channel, &prepared.encoded]).await?;
+    sqlx::query(NOTIFY_SQL)
+        .bind(&prepared.channel)
+        .bind(&prepared.encoded)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
 
     Ok(Retained {
@@ -629,17 +660,18 @@ impl Broker for PostgresBroker {
     async fn range(&self, stream: &str) -> Result<StreamRange, BrokerError> {
         let namespace = self.config.namespace.as_str();
 
-        let row = on_pool!(self, "broker range", |client| client
-            .query_opt(RANGE_SQL, &[&namespace, &stream]))?;
+        let row = on_pool!(self, "broker range", |client| sqlx::query_as::<
+            _,
+            (i64, i64, Option<i64>),
+        >(RANGE_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .fetch_optional(client))?;
 
-        let Some(row) = row else {
+        let Some((generation, next_seq, oldest)) = row else {
             // No position row: the stream has never been published to.
             return Ok(StreamRange { watermark: Cursor::new(1, 0), oldest: None });
         };
-
-        let generation: i64 = row.get(0);
-        let next_seq: i64 = row.get(1);
-        let oldest: Option<i64> = row.get(2);
 
         Ok(StreamRange {
             watermark: Cursor::new(
@@ -662,19 +694,24 @@ impl Broker for PostgresBroker {
         // At most `REPLAY_BATCH`, so the conversion cannot actually fail.
         let limit = i64::try_from(limit.min(REPLAY_BATCH)).unwrap_or(i64::MAX);
 
-        let rows = on_pool!(self, "broker fetch", |client| client
-            .query(FETCH_AFTER_SQL, &[&namespace, &stream, &generation, &sequence, &limit]))?;
+        let rows = on_pool!(self, "broker fetch", |client| sqlx::query_as::<
+            _,
+            (i64, String, String),
+        >(FETCH_AFTER_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .bind(generation)
+        .bind(sequence)
+        .bind(limit)
+        .fetch_all(client))?;
 
         Ok(rows
             .into_iter()
-            .map(|row| {
-                let seq: i64 = row.get(0);
-                RetainedMessage {
-                    stream: stream.to_string(),
-                    publication_id: row.get::<_, String>(1),
-                    position: Cursor::new(after.generation, seq.cast_unsigned()),
-                    json_payload: row.get::<_, String>(2),
-                }
+            .map(|(seq, publication_id, json_payload)| RetainedMessage {
+                stream: stream.to_string(),
+                publication_id,
+                position: Cursor::new(after.generation, seq.cast_unsigned()),
+                json_payload,
             })
             .collect())
     }
@@ -687,28 +724,37 @@ impl Broker for PostgresBroker {
             .to_json()
             .map_err(|e| BrokerError::InvalidRow { stream: String::new(), source: e })?;
 
-        let row = on_pool!(self, "broker fence", |client| client
-            .query_one(FENCE_SQL, &[&namespace, &session_id, &ttl_ms, &empty]))?;
+        let row = on_pool!(self, "broker fence", |client| sqlx::query(FENCE_SQL)
+            .bind(namespace)
+            .bind(session_id)
+            .bind(ttl_ms)
+            .bind(&empty)
+            .fetch_one(client))?;
 
         self.stats.record_fenced();
-        Ok(unsigned(&row, 0))
+        unsigned(&row, 0)
     }
 
     async fn fencing_generation(&self, session_id: &str) -> Result<u64, BrokerError> {
         let namespace = self.config.namespace.as_str();
 
-        let row = on_pool!(self, "broker fence read", |client| client
-            .query_opt(READ_FENCE_SQL, &[&namespace, &session_id]))?;
+        let row = on_pool!(self, "broker fence read", |client| sqlx::query(READ_FENCE_SQL)
+            .bind(namespace)
+            .bind(session_id)
+            .fetch_optional(client))?;
 
-        Ok(row.map_or(0, |row| unsigned(&row, 0)))
+        row.map_or(Ok(0), |row| unsigned(&row, 0))
     }
 
     async fn touch_session(&self, session_id: &str) -> Result<(), BrokerError> {
         let namespace = self.config.namespace.as_str();
         let ttl_ms = self.session_ttl_ms();
 
-        on_pool!(self, "broker session touch", |client| client
-            .execute(TOUCH_SESSION_SQL, &[&namespace, &session_id, &ttl_ms]))?;
+        on_pool!(self, "broker session touch", |client| sqlx::query(TOUCH_SESSION_SQL)
+            .bind(namespace)
+            .bind(session_id)
+            .bind(ttl_ms)
+            .execute(client))?;
 
         Ok(())
     }
@@ -717,8 +763,12 @@ impl Broker for PostgresBroker {
         let namespace = self.config.namespace.as_str();
         let ttl_ms = self.session_ttl_ms();
 
-        on_pool!(self, "broker snapshot", |client| client
-            .execute(SAVE_SNAPSHOT_SQL, &[&namespace, &session_id, &snapshot, &ttl_ms]))?;
+        on_pool!(self, "broker snapshot", |client| sqlx::query(SAVE_SNAPSHOT_SQL)
+            .bind(namespace)
+            .bind(session_id)
+            .bind(snapshot)
+            .bind(ttl_ms)
+            .execute(client))?;
 
         Ok(())
     }
@@ -726,10 +776,12 @@ impl Broker for PostgresBroker {
     async fn load_snapshot(&self, session_id: &str) -> Result<Option<String>, BrokerError> {
         let namespace = self.config.namespace.as_str();
 
-        let row = on_pool!(self, "broker snapshot read", |client| client
-            .query_opt(LOAD_SNAPSHOT_SQL, &[&namespace, &session_id]))?;
-
-        Ok(row.map(|row| row.get::<_, String>(0)))
+        on_pool!(self, "broker snapshot read", |client| sqlx::query_scalar::<_, String>(
+            LOAD_SNAPSHOT_SQL
+        )
+        .bind(namespace)
+        .bind(session_id)
+        .fetch_optional(client))
     }
 
     fn counters(&self) -> &BrokerStats {
@@ -773,6 +825,16 @@ async fn sweep_forever(
     }
 }
 
+/// A sweeper statement's result, labelled for the log. A transport failure
+/// also marks the session broken, so the next pass reconnects first.
+fn swept<T>(
+    open: &mut OpenClient,
+    label: &str,
+    result: Result<T, sqlx::Error>,
+) -> Result<T, BrokerError> {
+    open.note(result).map_err(|e| BrokerError::Backend(anyhow::anyhow!("{label}: {e}")))
+}
+
 /// One sweep pass. Exposed to the integration tests so expiry is deterministic
 /// there instead of timing-dependent.
 async fn sweep_once(
@@ -784,15 +846,14 @@ async fn sweep_once(
     // One lock for the whole pass: the sweeper's session runs its statements
     // back to back, and nothing else ever uses it.
     let mut guard = link.acquire().await?;
-    let client = &mut guard.client;
+    let open = &mut *guard;
     let mut removed: u64 = 0;
 
     for (sql, label) in [(SWEEP_MESSAGES_SQL, "messages"), (SWEEP_SESSIONS_SQL, "sessions")] {
         for _ in 0..SWEEP_BATCHES_PER_TICK {
-            let deleted = client
-                .execute(sql, &[&namespace, &SWEEP_BATCH])
-                .await
-                .map_err(|e| BrokerError::Backend(anyhow::anyhow!("{label} sweep: {e}")))?;
+            let result =
+                sqlx::query(sql).bind(namespace).bind(SWEEP_BATCH).execute(&mut open.client).await;
+            let deleted = swept(open, &format!("{label} sweep"), result)?.rows_affected();
             removed += deleted;
             if deleted == 0 {
                 break;
@@ -803,36 +864,39 @@ async fn sweep_once(
     // Byte budget: one aggregate per pass, then bounded deletes of the oldest
     // rows. Deliberately not on the publish path (see the module docs).
     let budget = i64::try_from(config.max_bytes_per_stream).unwrap_or(i64::MAX);
-    let over_budget = client
-        .query(OVER_BUDGET_SQL, &[&namespace, &budget, &BYTE_TRIM_STREAMS])
-        .await
-        .map_err(|e| BrokerError::Backend(anyhow::anyhow!("byte budget scan: {e}")))?;
+    let result = sqlx::query_as::<_, (String, i64)>(OVER_BUDGET_SQL)
+        .bind(namespace)
+        .bind(budget)
+        .bind(BYTE_TRIM_STREAMS)
+        .fetch_all(&mut open.client)
+        .await;
+    let over_budget = swept(open, "byte budget scan", result)?;
 
-    for row in over_budget {
-        let stream: String = row.get(0);
-        let generation: i64 = row.get(1);
-        let deleted = client
-            .execute(TRIM_BYTES_SQL, &[&namespace, &stream, &generation, &BYTE_TRIM_BATCH])
-            .await
-            .map_err(|e| BrokerError::Backend(anyhow::anyhow!("byte budget trim: {e}")))?;
+    for (stream, generation) in over_budget {
+        let result = sqlx::query(TRIM_BYTES_SQL)
+            .bind(namespace)
+            .bind(&stream)
+            .bind(generation)
+            .bind(BYTE_TRIM_BATCH)
+            .execute(&mut open.client)
+            .await;
+        let deleted = swept(open, "byte budget trim", result)?.rows_affected();
         removed += deleted;
         debug!(stream = %stream, rows = deleted, "Trimmed an over-budget stream");
     }
 
     // A stream whose history retention wiped starts a new generation, so an old
     // cursor is an explicit gap rather than a sequence that silently matches.
-    let wiped = client
-        .query(WIPED_STREAMS_SQL, &[&namespace, &BYTE_TRIM_STREAMS])
-        .await
-        .map_err(|e| BrokerError::Backend(anyhow::anyhow!("generation scan: {e}")))?;
+    let result = sqlx::query_as::<_, (String, i64)>(WIPED_STREAMS_SQL)
+        .bind(namespace)
+        .bind(BYTE_TRIM_STREAMS)
+        .fetch_all(&mut open.client)
+        .await;
+    let wiped = swept(open, "generation scan", result)?;
 
-    for row in wiped {
-        let stream: String = row.get(0);
-        let generation: i64 = row.get(1);
-        if bump_generation_tx(client, namespace, &stream, generation)
-            .await
-            .map_err(|e| BrokerError::Backend(anyhow::anyhow!("generation bump: {e}")))?
-        {
+    for (stream, generation) in wiped {
+        let result = bump_generation_tx(&mut open.client, namespace, &stream, generation).await;
+        if swept(open, "generation bump", result)? {
             info!(
                 stream = %stream,
                 generation = generation + 1,
@@ -858,33 +922,42 @@ async fn sweep_once(
 /// the existence check is a fresh statement after `FOR UPDATE` returned, so a
 /// message committed by the publish the lock waited for is visible to it.
 async fn bump_generation_tx(
-    client: &mut tokio_postgres::Client,
+    client: &mut PgConnection,
     namespace: &str,
     stream: &str,
     expected_generation: i64,
-) -> Result<bool, tokio_postgres::Error> {
-    let transaction = client.transaction().await?;
+) -> Result<bool, sqlx::Error> {
+    let mut transaction = sqlx::Connection::begin(client).await?;
 
-    let Some(position) = transaction.query_opt(LOCK_POSITION_SQL, &[&namespace, &stream]).await?
+    let Some((generation, next_seq)) = sqlx::query_as::<_, (i64, i64)>(LOCK_POSITION_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .fetch_optional(&mut *transaction)
+        .await?
     else {
         return Ok(false);
     };
-    let generation: i64 = position.get(0);
-    let next_seq: i64 = position.get(1);
     if generation != expected_generation || next_seq <= 1 {
         return Ok(false);
     }
 
-    let has_messages: bool = transaction
-        .query_one(STREAM_HAS_MESSAGES_SQL, &[&namespace, &stream, &generation])
-        .await?
-        .get(0);
+    let has_messages: bool = sqlx::query_scalar(STREAM_HAS_MESSAGES_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .bind(generation)
+        .fetch_one(&mut *transaction)
+        .await?;
     if has_messages {
         return Ok(false);
     }
 
-    let bumped =
-        transaction.execute(BUMP_GENERATION_SQL, &[&namespace, &stream, &generation]).await?;
+    let bumped = sqlx::query(BUMP_GENERATION_SQL)
+        .bind(namespace)
+        .bind(stream)
+        .bind(generation)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
     transaction.commit().await?;
     Ok(bumped > 0)
 }
@@ -900,14 +973,12 @@ async fn refresh_growth(
     stats: &BrokerStats,
 ) -> Result<u64, BrokerError> {
     let mut guard = link.acquire().await?;
-    let client = &mut guard.client;
+    let open = &mut *guard;
 
-    let row = client
-        .query_one(GROWTH_SQL, &[&namespace])
-        .await
-        .map_err(|e| BrokerError::Backend(anyhow::anyhow!("growth aggregate: {e}")))?;
-    let messages = unsigned(&row, 0);
-    let bytes = unsigned(&row, 1);
+    let result = sqlx::query(GROWTH_SQL).bind(namespace).fetch_one(&mut open.client).await;
+    let row = swept(open, "growth aggregate", result)?;
+    let messages = unsigned(&row, 0)?;
+    let bytes = unsigned(&row, 1)?;
     stats.set_growth(messages, bytes);
 
     // Rows to drop: the message excess, or the byte excess converted at the
@@ -928,10 +999,12 @@ async fn refresh_growth(
     let mut removed: u64 = 0;
     while remaining > 0 {
         let batch = i64::try_from(remaining).unwrap_or(i64::MAX).min(SWEEP_BATCH);
-        let deleted = client
-            .execute(TRIM_NAMESPACE_SQL, &[&namespace, &batch])
-            .await
-            .map_err(|e| BrokerError::Backend(anyhow::anyhow!("namespace quota trim: {e}")))?;
+        let result = sqlx::query(TRIM_NAMESPACE_SQL)
+            .bind(namespace)
+            .bind(batch)
+            .execute(&mut open.client)
+            .await;
+        let deleted = swept(open, "namespace quota trim", result)?.rows_affected();
         removed += deleted;
         if deleted == 0 {
             break;

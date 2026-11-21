@@ -68,9 +68,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde_json::{Map, Value};
+use sqlx::Transaction;
+use sqlx::postgres::{PgConnection, Postgres};
 use tracing::{debug, warn};
 
-use crate::pg::{AbortOnDrop, PgSlot, describe_pg_error};
+use crate::pg::{AbortOnDrop, PgSlot, describe_pg_error, is_server_error};
 use crate::presence::{
     HeldLease, Lease, MembershipKey, PRESENCE_TABLE, PresenceBackend, PresenceError,
     PresencePublisher, PresenceSnapshot, Transition, TransitionOutcome, presence_stream_key,
@@ -669,14 +671,15 @@ impl PgPresenceSession {
         let what = op.label();
         let mut open = self.slot.acquire().await?;
 
-        let first_error = match execute_op(&mut open.client, &op).await {
+        let first = execute_op(&mut open.client, &op).await;
+        let first_error = match open.note(first) {
             Ok(value) => return Ok(value),
             Err(e) => e,
         };
 
         // A server-reported failure (missing table, constraint violation) must
         // not be retried as if it were a dead socket: report it as-is.
-        if first_error.code().is_some() {
+        if is_server_error(&first_error) {
             return Err(PresenceError::Backend(anyhow::anyhow!(
                 "{what} failed: {}",
                 describe_pg_error(&first_error, missing_table_hint)
@@ -689,7 +692,8 @@ impl PgPresenceSession {
             "presence session failed; reconnecting once"
         );
         self.slot.reopen(&mut open).await?;
-        execute_op(&mut open.client, &op).await.map_err(|retry_error| {
+        let retry = execute_op(&mut open.client, &op).await;
+        open.note(retry).map_err(|retry_error| {
             PresenceError::Backend(anyhow::anyhow!(
                 "{what} failed after reconnect ({}); first attempt: {first_error}",
                 describe_pg_error(&retry_error, missing_table_hint)
@@ -699,9 +703,9 @@ impl PgPresenceSession {
 }
 
 async fn execute_op(
-    client: &mut tokio_postgres::Client,
+    client: &mut PgConnection,
     op: &SessionOp<'_>,
-) -> Result<OpOutcome, tokio_postgres::Error> {
+) -> Result<OpOutcome, sqlx::Error> {
     match *op {
         SessionOp::Join(lease) => join_tx(client, lease).await,
 
@@ -713,18 +717,26 @@ async fn execute_op(
 
             // Both statements in one transaction: a page and a total taken from
             // different snapshots would disagree with each other for no reason.
-            let transaction = client.transaction().await?;
-            let rows =
-                transaction.query(SNAPSHOT_SQL, &[&namespace, &stream, &limit, &offset]).await?;
-            let total: i64 =
-                transaction.query_one(COUNT_SUBJECTS_SQL, &[&namespace, &stream]).await?.get(0);
+            let mut transaction = sqlx::Connection::begin(client).await?;
+            let rows = sqlx::query_as::<_, (String, Option<String>)>(SNAPSHOT_SQL)
+                .bind(namespace)
+                .bind(stream)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&mut *transaction)
+                .await?;
+            let total: i64 = sqlx::query_scalar(COUNT_SUBJECTS_SQL)
+                .bind(namespace)
+                .bind(stream)
+                .fetch_one(&mut *transaction)
+                .await?;
             transaction.commit().await?;
 
             let members: Vec<PresenceMember> = rows
-                .iter()
-                .map(|row| PresenceMember {
-                    subject_id: row.get::<_, String>(0),
-                    metadata: decode_metadata(&row.get::<_, Option<String>>(1).unwrap_or_default()),
+                .into_iter()
+                .map(|(subject_id, metadata)| PresenceMember {
+                    subject_id,
+                    metadata: decode_metadata(&metadata.unwrap_or_default()),
                 })
                 .collect();
 
@@ -745,20 +757,25 @@ async fn execute_op(
             if sessions.is_empty() {
                 return Ok(OpOutcome::Rows(0));
             }
-            let rows = client
-                .execute(
-                    REFRESH_SQL,
-                    &[&namespace, &node_id, &sessions, &streams, &subjects, &ttls],
-                )
+            let done = sqlx::query(REFRESH_SQL)
+                .bind(namespace)
+                .bind(node_id)
+                .bind(sessions)
+                .bind(streams)
+                .bind(subjects)
+                .bind(ttls)
+                .execute(client)
                 .await?;
-            Ok(OpOutcome::Rows(rows))
+            Ok(OpOutcome::Rows(done.rows_affected()))
         }
 
         SessionOp::SweepCandidates { namespace, limit } => {
-            let rows = client.query(SWEEP_CANDIDATES_SQL, &[&namespace, &limit]).await?;
-            Ok(OpOutcome::Candidates(
-                rows.iter().map(|row| (row.get::<_, String>(0), row.get::<_, String>(1))).collect(),
-            ))
+            let candidates = sqlx::query_as::<_, (String, String)>(SWEEP_CANDIDATES_SQL)
+                .bind(namespace)
+                .bind(limit)
+                .fetch_all(client)
+                .await?;
+            Ok(OpOutcome::Candidates(candidates))
         }
 
         SessionOp::Expire { key } => expire_tx(client, key).await,
@@ -767,23 +784,36 @@ async fn execute_op(
 
 /// Live leases of `key`'s subject, read inside `transaction`.
 async fn count_leases(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     key: &MembershipKey,
-) -> Result<i64, tokio_postgres::Error> {
-    Ok(transaction
-        .query_one(COUNT_LEASES_SQL, &[&key.namespace, &key.stream, &key.subject_id])
-        .await?
-        .get(0))
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(COUNT_LEASES_SQL)
+        .bind(&key.namespace)
+        .bind(&key.stream)
+        .bind(&key.subject_id)
+        .fetch_one(&mut **transaction)
+        .await
 }
 
 /// Distinct live subjects on `key`'s stream, read inside `transaction`.
 async fn count_subjects(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     key: &MembershipKey,
-) -> Result<u64, tokio_postgres::Error> {
-    let total: i64 =
-        transaction.query_one(COUNT_SUBJECTS_SQL, &[&key.namespace, &key.stream]).await?.get(0);
+) -> Result<u64, sqlx::Error> {
+    let total: i64 = sqlx::query_scalar(COUNT_SUBJECTS_SQL)
+        .bind(&key.namespace)
+        .bind(&key.stream)
+        .fetch_one(&mut **transaction)
+        .await?;
     Ok(total.max(0).cast_unsigned())
+}
+
+/// Take the membership's advisory lock inside `transaction`.
+async fn lock_membership(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: &MembershipKey,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(LOCK_SQL).bind(key.lock_key()).execute(&mut **transaction).await.map(drop)
 }
 
 /// The subject-level transition of a removal: `deleted` rows went, `remaining`
@@ -797,37 +827,30 @@ const fn departure(deleted: u64, remaining: i64) -> Transition {
 }
 
 /// Claim or refresh one lease under the membership lock, as one transaction.
-async fn join_tx(
-    client: &mut tokio_postgres::Client,
-    lease: &Lease,
-) -> Result<OpOutcome, tokio_postgres::Error> {
+async fn join_tx(client: &mut PgConnection, lease: &Lease) -> Result<OpOutcome, sqlx::Error> {
     let key = &lease.key;
     let ttl_ms = ttl_millis(lease.ttl);
 
     // Dropping an uncommitted transaction rolls it back, so a failure
     // between the count and the upsert leaves no lease and announces
     // nothing.
-    let transaction = client.transaction().await?;
-    transaction.execute(LOCK_SQL, &[&key.lock_key()]).await?;
+    let mut transaction = sqlx::Connection::begin(client).await?;
+    lock_membership(&mut transaction, key).await?;
 
-    let before = count_leases(&transaction, key).await?;
+    let before = count_leases(&mut transaction, key).await?;
 
-    transaction
-        .execute(
-            UPSERT_SQL,
-            &[
-                &key.namespace,
-                &key.stream,
-                &key.subject_id,
-                &lease.session_id,
-                &lease.node_id,
-                &lease.metadata_json,
-                &ttl_ms,
-            ],
-        )
+    sqlx::query(UPSERT_SQL)
+        .bind(&key.namespace)
+        .bind(&key.stream)
+        .bind(&key.subject_id)
+        .bind(&lease.session_id)
+        .bind(&lease.node_id)
+        .bind(&lease.metadata_json)
+        .bind(ttl_ms)
+        .execute(&mut *transaction)
         .await?;
 
-    let total = count_subjects(&transaction, key).await?;
+    let total = count_subjects(&mut transaction, key).await?;
     transaction.commit().await?;
 
     let transition = if before == 0 { Transition::FirstJoin } else { Transition::Refreshed };
@@ -836,19 +859,24 @@ async fn join_tx(
 
 /// Drop one session's lease under the membership lock, as one transaction.
 async fn leave_tx(
-    client: &mut tokio_postgres::Client,
+    client: &mut PgConnection,
     key: &MembershipKey,
     session_id: &str,
-) -> Result<OpOutcome, tokio_postgres::Error> {
-    let transaction = client.transaction().await?;
-    transaction.execute(LOCK_SQL, &[&key.lock_key()]).await?;
+) -> Result<OpOutcome, sqlx::Error> {
+    let mut transaction = sqlx::Connection::begin(client).await?;
+    lock_membership(&mut transaction, key).await?;
 
-    let deleted = transaction
-        .execute(DELETE_LEASE_SQL, &[&key.namespace, &key.stream, &key.subject_id, &session_id])
-        .await?;
+    let deleted = sqlx::query(DELETE_LEASE_SQL)
+        .bind(&key.namespace)
+        .bind(&key.stream)
+        .bind(&key.subject_id)
+        .bind(session_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
 
-    let remaining = count_leases(&transaction, key).await?;
-    let total = count_subjects(&transaction, key).await?;
+    let remaining = count_leases(&mut transaction, key).await?;
+    let total = count_subjects(&mut transaction, key).await?;
     transaction.commit().await?;
 
     let transition = departure(deleted, remaining);
@@ -864,17 +892,22 @@ async fn leave_tx(
 /// them. The remaining-lease count is what keeps a subject with another live
 /// tab from being announced as gone.
 async fn expire_tx(
-    client: &mut tokio_postgres::Client,
+    client: &mut PgConnection,
     key: &MembershipKey,
-) -> Result<OpOutcome, tokio_postgres::Error> {
-    let transaction = client.transaction().await?;
-    transaction.execute(LOCK_SQL, &[&key.lock_key()]).await?;
+) -> Result<OpOutcome, sqlx::Error> {
+    let mut transaction = sqlx::Connection::begin(client).await?;
+    lock_membership(&mut transaction, key).await?;
 
-    let deleted =
-        transaction.execute(EXPIRE_SQL, &[&key.namespace, &key.stream, &key.subject_id]).await?;
+    let deleted = sqlx::query(EXPIRE_SQL)
+        .bind(&key.namespace)
+        .bind(&key.stream)
+        .bind(&key.subject_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
 
-    let remaining = count_leases(&transaction, key).await?;
-    let total = count_subjects(&transaction, key).await?;
+    let remaining = count_leases(&mut transaction, key).await?;
+    let total = count_subjects(&mut transaction, key).await?;
     transaction.commit().await?;
 
     let transition = departure(deleted, remaining);

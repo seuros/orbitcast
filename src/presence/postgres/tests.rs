@@ -1,6 +1,6 @@
 use super::*;
 use crate::pubsub::postgres::test_support::{
-    integration_client, integration_dsn, integration_namespace, spawn_listener,
+    batch_execute, integration_client, integration_dsn, integration_namespace, spawn_listener,
 };
 
 const NAMESPACE: &str = "example_production";
@@ -85,33 +85,33 @@ use crate::pubsub::PubSub as _;
 
 /// Create the presence table exactly as the gem migration does.
 async fn ensure_presence_table() {
-    let client = integration_client().await;
+    let mut client = integration_client().await;
 
     // Parallel `CREATE TABLE IF NOT EXISTS` can still collide in pg_type,
     // so the postcondition - not this statement's result - is the check.
-    let attempted = client
-        .batch_execute(
-            "CREATE TABLE IF NOT EXISTS orbitcast_presence (
-                     namespace text NOT NULL,
-                     stream text NOT NULL,
-                     subject_id text NOT NULL,
-                     session_id text NOT NULL,
-                     node_id text NOT NULL,
-                     metadata text NOT NULL,
-                     expires_at timestamptz NOT NULL,
-                     PRIMARY KEY (namespace, stream, subject_id, session_id));
-                 CREATE INDEX IF NOT EXISTS index_orbitcast_presence_on_expires_at
-                     ON orbitcast_presence (expires_at);
-                 CREATE INDEX IF NOT EXISTS index_orbitcast_presence_on_namespace_and_stream
-                     ON orbitcast_presence (namespace, stream);",
-        )
-        .await;
+    let attempted = batch_execute(
+        &mut client,
+        "CREATE TABLE IF NOT EXISTS orbitcast_presence (
+                 namespace text NOT NULL,
+                 stream text NOT NULL,
+                 subject_id text NOT NULL,
+                 session_id text NOT NULL,
+                 node_id text NOT NULL,
+                 metadata text NOT NULL,
+                 expires_at timestamptz NOT NULL,
+                 PRIMARY KEY (namespace, stream, subject_id, session_id));
+             CREATE INDEX IF NOT EXISTS index_orbitcast_presence_on_expires_at
+                 ON orbitcast_presence (expires_at);
+             CREATE INDEX IF NOT EXISTS index_orbitcast_presence_on_namespace_and_stream
+                 ON orbitcast_presence (namespace, stream);",
+    )
+    .await;
 
-    let present: Option<String> = client
-        .query_one("SELECT to_regclass('orbitcast_presence')::text", &[])
-        .await
-        .expect("query to_regclass")
-        .get(0);
+    let present: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('orbitcast_presence')::text")
+            .fetch_one(&mut client)
+            .await
+            .expect("query to_regclass");
     assert!(present.is_some(), "presence table must exist for these tests: {attempted:?}");
 }
 
@@ -121,21 +121,20 @@ async fn ensure_presence_table() {
 /// clearing its namespace works against a fresh database.
 async fn clear_namespace(namespace: &str) {
     ensure_presence_table().await;
-    integration_client()
-        .await
-        .execute("DELETE FROM orbitcast_presence WHERE namespace = $1", &[&namespace])
+    sqlx::query("DELETE FROM orbitcast_presence WHERE namespace = $1")
+        .bind(namespace)
+        .execute(&mut integration_client().await)
         .await
         .expect("namespace cleanup");
 }
 
 /// Live leases of one namespace, whatever their expiry.
 async fn row_count(namespace: &str) -> i64 {
-    integration_client()
-        .await
-        .query_one("SELECT count(*) FROM orbitcast_presence WHERE namespace = $1", &[&namespace])
+    sqlx::query_scalar("SELECT count(*) FROM orbitcast_presence WHERE namespace = $1")
+        .bind(namespace)
+        .fetch_one(&mut integration_client().await)
         .await
         .expect("row count")
-        .get(0)
 }
 
 /// A publisher that keeps what it was asked to announce.
@@ -252,16 +251,14 @@ async fn one_tabs_refresh_never_preserves_another_tabs_lease() {
     let snapshot = node.snapshot("chat:42", PresencePage { limit: 50, offset: 0 }).await.unwrap();
     assert_eq!(snapshot.total, 1, "the subject survives on its live tab");
 
-    let client = integration_client().await;
-    let live: i64 = client
-        .query_one(
-            "SELECT count(*) FROM orbitcast_presence \
-                 WHERE namespace = $1 AND expires_at > now()",
-            &[&namespace],
-        )
-        .await
-        .unwrap()
-        .get(0);
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM orbitcast_presence \
+             WHERE namespace = $1 AND expires_at > now()",
+    )
+    .bind(&namespace)
+    .fetch_one(&mut integration_client().await)
+    .await
+    .unwrap();
     assert_eq!(live, 1, "the dead tab was not kept alive by the live tab's refresh");
 
     clear_namespace(&namespace).await;
@@ -539,16 +536,15 @@ async fn transitions_reach_other_nodes_over_the_derived_presence_channel() {
 
 /// Milliseconds left on `session`'s lease, by the database clock.
 async fn remaining_ms(namespace: &str, session: &str) -> f64 {
-    integration_client()
-        .await
-        .query_one(
-            "SELECT (extract(epoch FROM (expires_at - now())) * 1000)::float8 \
-                 FROM orbitcast_presence WHERE namespace = $1 AND session_id = $2",
-            &[&namespace, &session],
-        )
-        .await
-        .expect("lease row")
-        .get(0)
+    sqlx::query_scalar(
+        "SELECT (extract(epoch FROM (expires_at - now())) * 1000)::float8 \
+             FROM orbitcast_presence WHERE namespace = $1 AND session_id = $2",
+    )
+    .bind(namespace)
+    .bind(session)
+    .fetch_one(&mut integration_client().await)
+    .await
+    .expect("lease row")
 }
 
 #[tokio::test]
@@ -602,9 +598,13 @@ async fn an_expiry_sweep_is_serialized_with_a_concurrent_join_under_the_membersh
 
     // Somebody else holds the membership lock: both the sweep and the join
     // must wait for it rather than proceed.
-    let holder = integration_client().await;
-    holder.batch_execute("BEGIN").await.unwrap();
-    holder.execute("SELECT pg_advisory_xact_lock($1::bigint)", &[&key.lock_key()]).await.unwrap();
+    let mut holder = integration_client().await;
+    batch_execute(&mut holder, "BEGIN").await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1::bigint)")
+        .bind(key.lock_key())
+        .execute(&mut holder)
+        .await
+        .unwrap();
 
     let sweeper_session = PgPresenceSession::connect(integration_dsn()).await.unwrap();
     let sweeper_config = PresenceConfig {
@@ -636,7 +636,7 @@ async fn an_expiry_sweep_is_serialized_with_a_concurrent_join_under_the_membersh
     assert_eq!(row_count(&namespace).await, 1, "nothing was removed behind the lock");
     assert_eq!(recorder.messages().len(), 1, "and nothing was announced");
 
-    holder.batch_execute("COMMIT").await.unwrap();
+    batch_execute(&mut holder, "COMMIT").await.unwrap();
     sweep.await.expect("sweep task");
     let outcome = join.await.expect("join task");
 

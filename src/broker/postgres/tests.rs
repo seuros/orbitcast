@@ -79,12 +79,11 @@ async fn sweeper() -> PgSlot {
 
 /// Rows of the broker table for one namespace, expired or not.
 async fn raw_message_count(namespace: &str) -> i64 {
-    integration_client()
-        .await
-        .query_one("SELECT count(*) FROM orbitcast_messages WHERE namespace = $1", &[&namespace])
+    sqlx::query_scalar("SELECT count(*) FROM orbitcast_messages WHERE namespace = $1")
+        .bind(namespace)
+        .fetch_one(&mut integration_client().await)
         .await
         .unwrap()
-        .get(0)
 }
 
 #[tokio::test]
@@ -205,16 +204,16 @@ async fn an_oversized_publication_is_retained_in_full_and_announced_by_reference
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].json_payload, payload, "replay reads the full payload from the broker row");
 
-    let relay_rows: i64 = integration_client()
-        .await
-        .query_one(
-            "SELECT count(*) FROM orbitcast_payloads WHERE id = $1::text::uuid \
-             AND namespace = $2 AND stream = $3 AND expires_at > now()",
-            &[&big.id, &big.namespace, &big.stream],
-        )
-        .await
-        .unwrap()
-        .get(0);
+    let relay_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM orbitcast_payloads WHERE id = $1::text::uuid \
+         AND namespace = $2 AND stream = $3 AND expires_at > now()",
+    )
+    .bind(&big.id)
+    .bind(&big.namespace)
+    .bind(&big.stream)
+    .fetch_one(&mut integration_client().await)
+    .await
+    .unwrap();
     assert_eq!(relay_rows, 1, "the live listeners find the relay row the notice references");
 }
 
@@ -324,20 +323,16 @@ async fn a_generation_bump_is_checked_under_the_stream_lock() {
     publisher.await.unwrap();
 
     let position = writer.range("chat:race").await.unwrap();
-    let stranded: i64 = integration_client()
-        .await
-        .query_one(
-            "SELECT count(*) FROM orbitcast_messages WHERE namespace = $1 AND stream = $2 \
-             AND generation <> $3::bigint AND expires_at > now()",
-            &[
-                &race_namespace,
-                &"chat:race",
-                &i64::try_from(position.watermark.generation).unwrap(),
-            ],
-        )
-        .await
-        .unwrap()
-        .get(0);
+    let stranded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM orbitcast_messages WHERE namespace = $1 AND stream = $2 \
+         AND generation <> $3::bigint AND expires_at > now()",
+    )
+    .bind(&race_namespace)
+    .bind("chat:race")
+    .bind(i64::try_from(position.watermark.generation).unwrap())
+    .fetch_one(&mut integration_client().await)
+    .await
+    .unwrap();
     assert_eq!(stranded, 0, "no live row may sit in a generation the stream has moved past");
 
     // Whether the sweeper won (generation 2 from sequence 1) or the writer

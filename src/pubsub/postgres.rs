@@ -9,10 +9,11 @@
 //!   connection driver task --bounded intake--> supervisor --bounded delivery--> listen()
 //! ```
 //!
-//! * The **connection driver task** does nothing but poll
-//!   [`tokio_postgres::Connection`] and forward notifications. It is never
-//!   blocked by a query, so awaiting `LISTEN` in the supervisor cannot deadlock
-//!   the driver.
+//! * The **connection driver task** owns the [`PgListener`]: it forwards
+//!   notifications into the bounded intake and runs the supervisor's `LISTEN`,
+//!   `UNLISTEN` and keepalive statements on request. The supervisor never
+//!   touches the connection itself, so it is never blocked by a read, and the
+//!   driver never waits on routing.
 //! * The **supervisor** owns the interest set (`channel -> stream`), executes
 //!   subscription commands, decodes notices, and reconnects. It is spawned at
 //!   construction, so subscriptions are acknowledged before anyone calls
@@ -24,7 +25,7 @@
 //!
 //! `subscribe`/`unsubscribe` send a command with a `oneshot` reply channel and
 //! await it under [`PostgresConfig::ack_timeout`]. The supervisor replies only
-//! after `client.batch_execute("LISTEN ...")` resolves, which the simple query
+//! after [`PgListener::listen`] (`LISTEN "..."`) resolves, which the simple query
 //! protocol completes on the server's `ReadyForQuery` - i.e. the command was
 //! executed, not merely queued. A failed `LISTEN` both fails the caller and
 //! recycles the connection.
@@ -76,11 +77,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use sqlx::postgres::{PgConnection, PgListener, PgNotification};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
-use tokio_postgres::AsyncMessage;
 use tracing::{debug, info, warn};
 
-use crate::pg::{AbortOnDrop, PgSlot, connect_with_sslmode, describe_pg_error};
+use crate::pg::{AbortOnDrop, PgSlot, describe_pg_error, is_server_error, listen_with_sslmode};
 use crate::protocol::Envelope;
 use crate::protocol::v1::publication::{OverflowRef, Publication};
 use crate::protocol::v1::validate_namespace;
@@ -422,15 +423,6 @@ impl PostgresPubSub {
     }
 }
 
-/// Quote a derived channel name for `LISTEN`/`UNLISTEN`.
-///
-/// Channel names are produced by [`channel_for`], so they are always
-/// `orbitcast_` plus lowercase hex; quoting is defensive, not sanitizing.
-fn quote_channel(channel: &str) -> String {
-    debug_assert!(channel.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
-    format!("\"{}\"", channel.replace('"', "\"\""))
-}
-
 /// A persistent, single-connection PostgreSQL session.
 ///
 /// One connection, serialized by a mutex, reconnected on failure. Two roles use
@@ -463,14 +455,15 @@ impl PgSession {
         let what = op.label();
         let mut open = self.slot.acquire().await?;
 
-        let first_error = match execute_op(&mut open.client, &op).await {
+        let first = execute_op(&mut open.client, &op).await;
+        let first_error = match open.note(first) {
             Ok(value) => return Ok(value),
             Err(e) => e,
         };
 
         // A server-reported failure (missing table, constraint violation) must
         // not be retried as if it were a dead socket: report it as-is.
-        if first_error.code().is_some() {
+        if is_server_error(&first_error) {
             return Err(PubSubError::Backend(anyhow::anyhow!(
                 "{what} failed: {}",
                 describe_pg_error(&first_error, missing_table_hint)
@@ -483,7 +476,8 @@ impl PgSession {
             "PostgreSQL session failed; reconnecting once"
         );
         self.slot.reopen(&mut open).await?;
-        execute_op(&mut open.client, &op).await.map_err(|retry_error| {
+        let retry = execute_op(&mut open.client, &op).await;
+        open.note(retry).map_err(|retry_error| {
             PubSubError::Backend(anyhow::anyhow!(
                 "{what} failed after reconnect ({}); first attempt: {first_error}",
                 describe_pg_error(&retry_error, missing_table_hint)
@@ -570,39 +564,42 @@ enum SessionOutcome {
 }
 
 async fn execute_op(
-    client: &mut tokio_postgres::Client,
+    client: &mut PgConnection,
     op: &SessionOp<'_>,
-) -> Result<SessionOutcome, tokio_postgres::Error> {
+) -> Result<SessionOutcome, sqlx::Error> {
     match *op {
         SessionOp::Notify { channel, payload } => {
-            client.execute(NOTIFY_SQL, &[&channel, &payload]).await?;
+            sqlx::query(NOTIFY_SQL).bind(channel).bind(payload).execute(client).await?;
             Ok(SessionOutcome::Done)
         }
         SessionOp::PublishOverflow { channel, payload, row, ttl_ms } => {
             // Dropping an uncommitted Transaction rolls it back, so a failure
             // between the insert and the notify leaves no row and sends nothing.
-            let transaction = client.transaction().await?;
-            transaction
-                .execute(
-                    OVERFLOW_INSERT_SQL,
-                    &[&row.id, &row.namespace, &row.stream, &row.json_payload, &ttl_ms],
-                )
+            let mut transaction = sqlx::Connection::begin(client).await?;
+            sqlx::query(OVERFLOW_INSERT_SQL)
+                .bind(&row.id)
+                .bind(&row.namespace)
+                .bind(&row.stream)
+                .bind(&row.json_payload)
+                .bind(ttl_ms)
+                .execute(&mut *transaction)
                 .await?;
-            transaction.execute(NOTIFY_SQL, &[&channel, &payload]).await?;
+            sqlx::query(NOTIFY_SQL).bind(channel).bind(payload).execute(&mut *transaction).await?;
             transaction.commit().await?;
             Ok(SessionOutcome::Done)
         }
         SessionOp::FetchOverflow(reference) => {
-            let row = client
-                .query_opt(
-                    OVERFLOW_FETCH_SQL,
-                    &[&reference.id, &reference.namespace, &reference.stream],
-                )
+            let payload = sqlx::query_scalar::<_, String>(OVERFLOW_FETCH_SQL)
+                .bind(&reference.id)
+                .bind(&reference.namespace)
+                .bind(&reference.stream)
+                .fetch_optional(client)
                 .await?;
-            Ok(SessionOutcome::Fetched(row.map(|row| row.get::<_, String>(0))))
+            Ok(SessionOutcome::Fetched(payload))
         }
         SessionOp::DeleteExpired { limit } => {
-            Ok(SessionOutcome::Deleted(client.execute(OVERFLOW_CLEANUP_SQL, &[&limit]).await?))
+            let done = sqlx::query(OVERFLOW_CLEANUP_SQL).bind(limit).execute(client).await?;
+            Ok(SessionOutcome::Deleted(done.rows_affected()))
         }
     }
 }
@@ -713,6 +710,110 @@ struct ListenerShared<'a> {
     overflow: Option<&'a Arc<PgSession>>,
 }
 
+/// A statement the session loop runs on the listener connection.
+enum ListenerStatement {
+    Listen(String),
+    Unlisten(String),
+    Keepalive,
+}
+
+/// One [`ListenerStatement`] and where its result goes.
+struct ListenerCall {
+    statement: ListenerStatement,
+    done: oneshot::Sender<Result<(), sqlx::Error>>,
+}
+
+/// The session loop's handle on the connection driver task.
+struct ListenerLink {
+    calls: mpsc::Sender<ListenerCall>,
+}
+
+impl ListenerLink {
+    /// Run one statement on the listener connection and wait for PostgreSQL
+    /// to complete it.
+    ///
+    /// # Errors
+    ///
+    /// The statement's error, or "listener connection closed" when the
+    /// driver task has already ended.
+    async fn run(&self, statement: ListenerStatement) -> anyhow::Result<()> {
+        let (done, result) = oneshot::channel();
+        self.calls
+            .send(ListenerCall { statement, done })
+            .await
+            .map_err(|_| anyhow::anyhow!("listener connection closed"))?;
+        result.await.map_err(|_| anyhow::anyhow!("listener connection closed"))??;
+        Ok(())
+    }
+}
+
+/// The connection driver: owns the [`PgListener`], forwards notifications
+/// into the bounded intake, and runs the session loop's statements.
+///
+/// Ends - dropping `intake_tx`, which tells the session loop the connection is
+/// gone - when the connection is lost or fails, or when the session loop
+/// itself ended. The listener never reconnects on its own
+/// ([`listen_with_sslmode`]): reconnect and backoff belong to the supervisor.
+///
+/// [`PgListener::try_recv`] is cancel-safe (a partially read message stays
+/// buffered), so racing it against the next statement loses nothing; while a
+/// statement runs, notifications that arrive are buffered by the listener and
+/// handed out by the next `try_recv`.
+async fn drive_listener(
+    mut listener: PgListener,
+    mut calls: mpsc::Receiver<ListenerCall>,
+    intake_tx: mpsc::Sender<PgNotification>,
+    stats: Arc<PubSubStats>,
+    queue_capacity: usize,
+) {
+    loop {
+        tokio::select! {
+            call = calls.recv() => {
+                let Some(ListenerCall { statement, done }) = call else {
+                    break; // the session loop ended
+                };
+                let result = match &statement {
+                    ListenerStatement::Listen(channel) => listener.listen(channel).await,
+                    ListenerStatement::Unlisten(channel) => listener.unlisten(channel).await,
+                    ListenerStatement::Keepalive => {
+                        sqlx::raw_sql("SELECT 1").execute(&mut listener).await.map(drop)
+                    }
+                };
+                // The session loop only drops the reply when it is itself
+                // shutting down; it learns of a failure from this result.
+                let _ = done.send(result);
+            }
+            received = listener.try_recv() => match received {
+                Ok(Some(notification)) => match intake_tx.try_send(notification) {
+                    Ok(()) => {
+                        // Lag high-water mark: how far behind the consumer
+                        // runs is what predicts the next intake drop.
+                        let depth = queue_capacity.saturating_sub(intake_tx.capacity());
+                        stats.record_intake_depth(depth as u64);
+                    }
+                    Err(mpsc::error::TrySendError::Full(dropped)) => {
+                        stats.record_intake_drop();
+                        warn!(
+                            channel = %dropped.channel(),
+                            "Notification intake queue full; dropping publication"
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                },
+                Ok(None) => {
+                    warn!("Listener connection lost");
+                    break;
+                }
+                Err(e) => {
+                    warn!(error = %e, "Listener connection error");
+                    break;
+                }
+            }
+        }
+    }
+    // Dropping intake_tx signals connection loss to the session loop.
+}
+
 /// One listener connection's lifetime.
 ///
 /// `Ok(())` means the backend is shutting down (command channel closed);
@@ -731,58 +832,32 @@ async fn run_session(
         stats,
         overflow,
     } = *shared;
-    let (client, mut connection) = connect_with_sslmode(config.listener_url()).await?;
+    let listener = listen_with_sslmode(config.listener_url()).await?;
 
-    // The driver task only polls the connection and forwards notifications, so
-    // awaiting a LISTEN below can never stall it.
+    // The driver task owns the connection; awaiting a LISTEN below only waits
+    // for its reply and never stalls notification intake.
     let (intake_tx, mut intake_rx) = mpsc::channel(config.queue_capacity);
-    let driver_stats = stats.clone();
-    let queue_capacity = config.queue_capacity;
-    let driver = tokio::spawn(async move {
-        loop {
-            match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
-                Some(Ok(AsyncMessage::Notification(notification))) => {
-                    match intake_tx.try_send(notification) {
-                        Ok(()) => {
-                            // Lag high-water mark: how far behind the consumer
-                            // runs is what predicts the next intake drop.
-                            let depth = queue_capacity.saturating_sub(intake_tx.capacity());
-                            driver_stats.record_intake_depth(depth as u64);
-                        }
-                        Err(mpsc::error::TrySendError::Full(dropped)) => {
-                            driver_stats.record_intake_drop();
-                            warn!(
-                                channel = %dropped.channel(),
-                                "Notification intake queue full; dropping publication"
-                            );
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => break,
-                    }
-                }
-                Some(Ok(_)) => {}
-                Some(Err(e)) => {
-                    warn!(error = %e, "Listener connection error");
-                    break;
-                }
-                None => break,
-            }
-        }
-        // Dropping intake_tx signals connection loss to the session loop.
-    });
+    let (call_tx, call_rx) = mpsc::channel(1);
+    let driver = tokio::spawn(drive_listener(
+        listener,
+        call_rx,
+        intake_tx,
+        stats.clone(),
+        config.queue_capacity,
+    ));
     let _driver_guard = AbortOnDrop(driver);
+    let link = ListenerLink { calls: call_tx };
 
     // Control interest first, then every stream interest, all before
     // announcing readiness: a ready node is always reachable for a
     // Rails-initiated disconnect.
-    client
-        .batch_execute(&format!("LISTEN {}", quote_channel(control_channel)))
+    link.run(ListenerStatement::Listen(control_channel.to_string()))
         .await
         .map_err(|e| anyhow::anyhow!("LISTEN {control_channel} (control) failed: {e}"))?;
 
     // Re-establish every interest before announcing readiness.
     for (channel, stream) in interests.iter() {
-        client
-            .batch_execute(&format!("LISTEN {}", quote_channel(channel)))
+        link.run(ListenerStatement::Listen(channel.clone()))
             .await
             .map_err(|e| anyhow::anyhow!("re-LISTEN {channel} ({stream}) failed: {e}"))?;
     }
@@ -801,7 +876,7 @@ async fn run_session(
                 let Some(command) = command else {
                     return Ok(()); // backend dropped: shut down
                 };
-                apply_command(&client, interests, command).await?;
+                apply_command(&link, interests, command).await?;
             }
             notification = intake_rx.recv() => {
                 let Some(notification) = notification else {
@@ -828,8 +903,7 @@ async fn run_session(
                 route_notification(config, delivery_tx, stats, overflow, &notification);
             }
             _ = keepalive.tick() => {
-                client
-                    .execute("SELECT 1", &[])
+                link.run(ListenerStatement::Keepalive)
                     .await
                     .map_err(|e| anyhow::anyhow!("listener keepalive failed: {e}"))?;
             }
@@ -842,7 +916,7 @@ async fn run_session(
 /// The acknowledgement is sent only after PostgreSQL completed the command.
 /// A failed command is reported to the caller *and* recycles the session.
 async fn apply_command(
-    client: &tokio_postgres::Client,
+    link: &ListenerLink,
     interests: &mut HashMap<String, String>,
     command: ListenerCommand,
 ) -> anyhow::Result<()> {
@@ -867,7 +941,7 @@ async fn apply_command(
                 None => {}
             }
 
-            match client.batch_execute(&format!("LISTEN {}", quote_channel(&channel))).await {
+            match link.run(ListenerStatement::Listen(channel.clone())).await {
                 Ok(()) => {
                     debug!(channel = %channel, stream = %stream, "LISTEN acknowledged");
                     interests.insert(channel, stream);
@@ -883,7 +957,7 @@ async fn apply_command(
                 return Ok(());
             }
 
-            match client.batch_execute(&format!("UNLISTEN {}", quote_channel(&channel))).await {
+            match link.run(ListenerStatement::Unlisten(channel.clone())).await {
                 Ok(()) => {
                     debug!(channel = %channel, stream = %stream, "UNLISTEN acknowledged");
                     ack_ok(ack);
@@ -911,7 +985,7 @@ fn ack_failure(
     ack: oneshot::Sender<Result<(), PubSubError>>,
     verb: &str,
     channel: &str,
-    error: &tokio_postgres::Error,
+    error: &anyhow::Error,
 ) -> anyhow::Result<()> {
     let message = format!("{verb} {channel} failed: {error}");
     // The caller may already have timed out; the session is recycled either way.
@@ -931,7 +1005,7 @@ fn route_notification(
     delivery_tx: &mpsc::Sender<DeliverySlot>,
     stats: &Arc<PubSubStats>,
     overflow: Option<&Arc<PgSession>>,
-    notification: &tokio_postgres::Notification,
+    notification: &PgNotification,
 ) {
     let channel = notification.channel();
 

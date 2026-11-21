@@ -123,15 +123,15 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
-      # native-tls is built with its `vendored` feature (see Cargo.toml), so
-      # openssl-sys compiles OpenSSL from source with musl-gcc: the musl binary
-      # is fully static and never links a host OpenSSL.
+      # PostgreSQL TLS is rustls on ring (see Cargo.toml); ring's C and
+      # assembly are compiled with musl-gcc, so the musl binary is fully
+      # static and links no OpenSSL at all.
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       # glibc floor: cargo-zigbuild links against the declared glibc version
-      # (zig ships the stubs), with vendored OpenSSL compiled by `zig cc`.
+      # (zig ships the stubs), with ring's C compiled by `zig cc`.
       - name: Install cargo-zigbuild + Zig
         if: matrix.builder == 'zigbuild'
         # pipx (preinstalled on the Ubuntu runners) rather than pip: the

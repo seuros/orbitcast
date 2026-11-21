@@ -12,12 +12,15 @@
 //! ```
 #![cfg(all(feature = "postgres", not(feature = "memory")))]
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use orbitcast::broker::postgres::{PostgresBroker, PostgresBrokerConfig};
 use orbitcast::broker::{Broker, BrokerConfig};
 use orbitcast::protocol::v1::publication::Publication;
 use orbitcast::protocol::v1::recovery::Cursor;
+use sqlx::Connection as _;
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgSslMode};
 
 /// The broker tables exactly as the gem migrations leave them; one copy
 /// shared with the crate's own `#[ignore]` tests.
@@ -25,12 +28,10 @@ const SCHEMA_SQL: &str = include_str!("support/broker_schema.sql");
 
 async fn open(namespace: &str) -> Arc<PostgresBroker> {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL for the #[ignore] test");
-    let (client, connection) =
-        tokio_postgres::connect(&url, tokio_postgres::NoTls).await.expect("connect");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    client.batch_execute(SCHEMA_SQL).await.expect("schema");
+    let options =
+        PgConnectOptions::from_str(&url).expect("DATABASE_URL").ssl_mode(PgSslMode::Disable);
+    let mut client = PgConnection::connect_with(&options).await.expect("connect");
+    sqlx::raw_sql(SCHEMA_SQL).execute(&mut client).await.expect("schema");
 
     let config = PostgresBrokerConfig::new(
         url,
