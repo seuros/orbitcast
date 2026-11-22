@@ -412,6 +412,23 @@ if DUMMY_APP_AVAILABLE
       refute_equal Rails.application.secret_key_base, config.streams_secret
     end
 
+    def test_the_application_key_generator_preserves_the_configured_hash_digest_class
+      expected_digest = Rails.application.config.active_support.key_generator_hash_digest_class
+
+      assert_equal OpenSSL::Digest::SHA256, expected_digest
+
+      reference = ActiveSupport::KeyGenerator.new(
+        Rails.application.secret_key_base,
+        iterations: 1000,
+        hash_digest_class: expected_digest
+      )
+
+      assert_equal reference.generate_key("signed cookie", 32),
+                   Rails.application.key_generator.generate_key("signed cookie", 32)
+      assert_equal reference.generate_key("orbitcast/streams/v1/#{NAMESPACE}", 32),
+                   Orbitcast.config.streams_secret
+    end
+
     # --- teardown -------------------------------------------------------------
 
     def test_close_channel_runs_unsubscribed_without_emitting_effects
