@@ -57,8 +57,18 @@ module Orbitcast
     # may still arrive later (cable.yml is read lazily by the adapter and the
     # launcher), which is why the generator is handed over and the key is
     # derived on first use rather than here.
-    config.after_initialize do |app|
-      Orbitcast.config.key_generator ||= app.key_generator
+    #
+    # Register inside an initializer ordered after ActiveSupport sets
+    # `ActiveSupport::KeyGenerator.hash_digest_class` (Rails 7.0+ SHA256 default).
+    # Calling `config.after_initialize` at class body evaluation time runs before
+    # `active_support.set_key_generator_hash_digest_class`, which would memoize
+    # `app.key_generator` with the legacy SHA1 default and invalidate signed or
+    # encrypted cookies and ActiveStorage signed IDs.
+    initializer "orbitcast.key_generator",
+                after: "active_support.set_key_generator_hash_digest_class" do |app|
+      config.after_initialize do
+        Orbitcast.config.key_generator ||= app.key_generator
+      end
     end
 
     # Rails-dispatch mode only: mount the private RPC endpoint the relay calls
